@@ -64,8 +64,35 @@ button:disabled {
   line-height: 1.35;
 }
 
+.results li.selected {
+  border-color: #0d5bd7;
+  box-shadow: 0 0 0 1px rgba(13, 91, 215, 0.2);
+}
+
 .results code {
   word-break: break-all;
+}
+
+.result-actions {
+  margin-top: 8px;
+}
+
+.result-actions button {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.selected-pill {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e8f0ff;
+  color: #0d4eb6;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .empty {

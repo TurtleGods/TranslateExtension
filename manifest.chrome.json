@@ -3,7 +3,7 @@
   "name": "Translate Video Subtitles",
   "version": "0.1.0",
   "description": "Phase 1: Detect video elements on the active tab.",
-  "permissions": ["activeTab", "scripting", "tabs"],
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "background": {
     "service_worker": "background.js"
   },

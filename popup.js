@@ -3,6 +3,7 @@ const extApi = globalThis.browser ?? globalThis.chrome;
 const scanButton = document.getElementById("scanButton");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
+let lastScanData = null;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -12,10 +13,17 @@ function clearResults() {
   resultsEl.innerHTML = "";
 }
 
-function addResultItem(html) {
+function addResultItem(html, options = {}) {
   const li = document.createElement("li");
   li.innerHTML = html;
+  if (options.className) {
+    li.className = options.className;
+  }
+  if (options.videoIndex !== undefined) {
+    li.dataset.videoIndex = String(options.videoIndex);
+  }
   resultsEl.appendChild(li);
+  return li;
 }
 
 function escapeHtml(text) {
@@ -46,6 +54,7 @@ function sendRuntimeMessage(message) {
 
 function renderResults(scanData) {
   clearResults();
+  lastScanData = scanData;
 
   const videos = scanData?.videos || [];
   if (videos.length === 0) {
@@ -55,15 +64,42 @@ function renderResults(scanData) {
 
   videos.forEach((video) => {
     const src = video.src ? `<code>${escapeHtml(video.src)}</code>` : "<em>No src</em>";
+    const isSelected = scanData?.selectedVideoIndex === video.index;
     addResultItem(
       [
         `<strong>Video ${video.index + 1}</strong>`,
         `Visible: ${video.visible ? "Yes" : "No"} | ${video.width}x${video.height}`,
         `Paused: ${video.paused ? "Yes" : "No"} | Duration: ${video.duration ?? "unknown"}s`,
-        `Source: ${src}`
-      ].join("<br>")
+        `Source: ${src}`,
+        isSelected ? '<span class="selected-pill">Selected for translation</span>' : "",
+        `<div class="result-actions"><button type="button" data-action="select-video" data-video-index="${video.index}">Select This Video</button></div>`
+      ].filter(Boolean).join("<br>"),
+      {
+        className: isSelected ? "selected" : "",
+        videoIndex: video.index
+      }
     );
   });
+}
+
+async function onSelectVideo(videoIndex) {
+  setStatus(`Selecting video ${videoIndex + 1}...`);
+
+  const response = await sendRuntimeMessage({
+    type: "SET_ACTIVE_TAB_TARGET_VIDEO",
+    videoIndex
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to select video.");
+  }
+
+  if (lastScanData) {
+    lastScanData = { ...lastScanData, selectedVideoIndex: videoIndex };
+    renderResults(lastScanData);
+  }
+
+  setStatus(`Selected video ${videoIndex + 1} for future translation flow.`);
 }
 
 async function onScanClick() {
@@ -89,3 +125,23 @@ async function onScanClick() {
 }
 
 scanButton.addEventListener("click", onScanClick);
+resultsEl.addEventListener("click", async (event) => {
+  const button = event.target.closest('button[data-action="select-video"]');
+  if (!button) {
+    return;
+  }
+
+  const videoIndex = Number(button.dataset.videoIndex);
+  if (!Number.isInteger(videoIndex)) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await onSelectVideo(videoIndex);
+  } catch (error) {
+    setStatus(`Error: ${error.message || String(error)}`);
+  } finally {
+    button.disabled = false;
+  }
+});

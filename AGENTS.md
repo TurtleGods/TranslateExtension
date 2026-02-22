@@ -9,6 +9,7 @@ Implement and verify the first goal only:
 - Project scaffold created (`manifest.json`, `background.js`, `content.js`, `popup.html`, `popup.js`, `popup.css`).
 - Implemented popup-triggered scan of the active tab.
 - Implemented video metadata detection and popup result display.
+- Implemented target video selection from the detected list (stored per active tab).
 - Added browser-specific manifests: `manifest.firefox.json` and `manifest.chrome.json`.
 - Added `switch-manifest.ps1` to switch the active `manifest.json` for local testing.
 - OpenAI/audio capture is not implemented yet.
@@ -39,6 +40,7 @@ Implement and verify the first goal only:
 ## Permissions (Phase 1)
 - `activeTab`
 - `scripting`
+- `storage`
 - `tabs`
 
 ## Local Dev Notes
@@ -54,6 +56,8 @@ Implement and verify the first goal only:
 3. Content script finds all visible `video` elements on the page.
 4. Content script returns metadata (index, src/currentSrc, duration, size, paused state).
 5. Popup displays the detected video list.
+6. User selects one video as the future translation target.
+7. Background script stores the selected video index per tab in extension storage.
 
 ## Security & Privacy
 - No audio capture or upload in Phase 1.
@@ -63,7 +67,7 @@ Implement and verify the first goal only:
 ## Initial Milestones (reordered)
 1. Scaffolding: manifest + background + content + popup. (Done)
 2. Video detection on active tab and popup display. (Done)
-3. Select target video for future translation flow.
+3. Select target video for future translation flow. (Done)
 4. Audio capture prototype and mock subtitles overlay.
 5. Real OpenAI request and subtitle timing pipeline.
 
@@ -71,3 +75,4 @@ Implement and verify the first goal only:
 - How to handle pages with multiple videos (selection UI vs auto-pick).
 - Whether iframe-hosted videos are in scope for Phase 1.
 - Minimum metadata needed before audio capture integration.
+- When to clear stored video selection (tab reload, URL change, manual reset).
