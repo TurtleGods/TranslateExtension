@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Phase 1: Detect video elements on the active tab.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["http://localhost:8787/*"],
   "background": {
     "service_worker": "background.js"
   },

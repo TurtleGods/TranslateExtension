@@ -12,7 +12,11 @@ Implement and verify the first goal only:
 - Implemented target video selection from the detected list (stored per active tab).
 - Added browser-specific manifests: `manifest.firefox.json` and `manifest.chrome.json`.
 - Added `switch-manifest.ps1` to switch the active `manifest.json` for local testing.
-- OpenAI/audio capture is not implemented yet.
+- Added local backend proxy scaffold in `server/` for OpenAI timed-text processing.
+- Added backend `.env` config pattern for API key (`server/.env.example`).
+- Added background message placeholder to send audio bytes to the backend (`REQUEST_TIMED_TEXT_FROM_BACKEND`).
+- Audio capture from the tab is still not implemented.
+- Subtitle rendering is still not implemented.
 
 ## Goals
 - Detect video elements on the active tab (including HTML5 video).
@@ -36,12 +40,16 @@ Implement and verify the first goal only:
 - Content script: scans the page for `video` elements and reports metadata.
 - Background worker: coordinates extension actions and future API calls.
 - Popup UI: trigger scan and show detected videos.
+- `server/`: local backend proxy for OpenAI audio transcription/translation requests.
 
 ## Permissions (Phase 1)
 - `activeTab`
 - `scripting`
 - `storage`
 - `tabs`
+
+## Permissions (Backend Connectivity)
+- `host_permissions`: `http://localhost:8787/*` (local backend during development)
 
 ## Local Dev Notes
 - Firefox (current `web-ext` compatibility): use `manifest.firefox.json`.
@@ -60,19 +68,20 @@ Implement and verify the first goal only:
 7. Background script stores the selected video index per tab in extension storage.
 
 ## Security & Privacy
-- No audio capture or upload in Phase 1.
-- No OpenAI API calls in Phase 1.
-- Keep page inspection local to the browser.
+- Phase 1 page inspection stays local to the browser.
+- OpenAI API key should be stored in `server/.env` (backend), not in the extension.
+- Current backend scaffold supports OpenAI audio requests, but extension audio capture/upload trigger is not wired yet.
 
 ## Initial Milestones (reordered)
 1. Scaffolding: manifest + background + content + popup. (Done)
 2. Video detection on active tab and popup display. (Done)
 3. Select target video for future translation flow. (Done)
 4. Audio capture prototype and mock subtitles overlay.
-5. Real OpenAI request and subtitle timing pipeline.
+5. Real OpenAI request and subtitle timing pipeline. (Backend scaffolded; extension capture/render pending)
 
 ## Assumptions / Open Questions
 - How to handle pages with multiple videos (selection UI vs auto-pick).
 - Whether iframe-hosted videos are in scope for Phase 1.
 - Minimum metadata needed before audio capture integration.
 - When to clear stored video selection (tab reload, URL change, manual reset).
+- Whether to use direct OpenAI audio translation (English-only) or transcription + text translation for target-language subtitles.

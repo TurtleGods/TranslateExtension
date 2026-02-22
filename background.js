@@ -1,5 +1,9 @@
 const extApi = globalThis.browser ?? globalThis.chrome;
 const SELECTED_VIDEO_STORAGE_KEY = "selectedVideoByTabId";
+const SETTINGS_STORAGE_KEY = "appSettings";
+const DEFAULT_APP_SETTINGS = {
+  backendBaseUrl: "http://localhost:8787"
+};
 
 function queryActiveTab() {
   if (extApi.tabs.query.length === 1) {
@@ -100,6 +104,21 @@ async function getSelectedVideoByTabMap() {
   return result?.[SELECTED_VIDEO_STORAGE_KEY] || {};
 }
 
+async function getAppSettings() {
+  const result = await storageLocalGet({ [SETTINGS_STORAGE_KEY]: DEFAULT_APP_SETTINGS });
+  return {
+    ...DEFAULT_APP_SETTINGS,
+    ...(result?.[SETTINGS_STORAGE_KEY] || {})
+  };
+}
+
+async function updateAppSettings(patch) {
+  const current = await getAppSettings();
+  const next = { ...current, ...patch };
+  await storageLocalSet({ [SETTINGS_STORAGE_KEY]: next });
+  return next;
+}
+
 async function getSelectedVideoIndexForTab(tabId) {
   const selectedByTab = await getSelectedVideoByTabMap();
   const value = selectedByTab[String(tabId)];
@@ -159,6 +178,61 @@ async function setActiveTabTargetVideo(videoIndex) {
   };
 }
 
+function base64ToUint8Array(base64) {
+  const binaryString = globalThis.atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i += 1) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function requestTimedTextFromBackend(payload) {
+  const settings = await getAppSettings();
+  const backendBaseUrl = String(settings.backendBaseUrl || DEFAULT_APP_SETTINGS.backendBaseUrl).replace(/\/+$/, "");
+
+  if (!payload?.audioBase64) {
+    throw new Error("Missing audioBase64 payload.");
+  }
+
+  const mimeType = payload.mimeType || "audio/webm";
+  const fileExtension = mimeType.includes("wav") ? "wav" : mimeType.includes("mp4") ? "m4a" : "webm";
+  const audioBytes = base64ToUint8Array(payload.audioBase64);
+  const audioBlob = new Blob([audioBytes], { type: mimeType });
+
+  const form = new FormData();
+  form.append("audio", audioBlob, `segment.${fileExtension}`);
+  form.append("mode", payload.mode || "transcribe");
+  if (payload.sourceLanguage) {
+    form.append("sourceLanguage", payload.sourceLanguage);
+  }
+  if (payload.targetLanguage) {
+    form.append("targetLanguage", payload.targetLanguage);
+  }
+
+  const response = await fetch(`${backendBaseUrl}/api/openai/audio/timed-text`, {
+    method: "POST",
+    body: form
+  });
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const message = data?.error || `Backend request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return {
+    backendBaseUrl,
+    ...data
+  };
+}
+
 extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "SCAN_ACTIVE_TAB_VIDEOS") {
     scanActiveTabVideos()
@@ -170,6 +244,30 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "SET_ACTIVE_TAB_TARGET_VIDEO") {
     setActiveTabTargetVideo(message.videoIndex)
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+
+    return true;
+  }
+
+  if (message?.type === "GET_APP_SETTINGS") {
+    getAppSettings()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+
+    return true;
+  }
+
+  if (message?.type === "UPDATE_APP_SETTINGS") {
+    updateAppSettings(message.patch || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+
+    return true;
+  }
+
+  if (message?.type === "REQUEST_TIMED_TEXT_FROM_BACKEND") {
+    requestTimedTextFromBackend(message.payload || {})
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
 
