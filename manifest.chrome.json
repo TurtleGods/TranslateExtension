@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Translate Video Subtitles",
+  "version": "0.1.0",
+  "description": "Phase 1: Detect video elements on the active tab.",
+  "permissions": ["activeTab", "scripting", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Translate Video",
+    "default_popup": "popup.html"
+  }
+}
