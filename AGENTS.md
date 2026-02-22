@@ -1,5 +1,17 @@
 ## Project Overview
-Build a cross‑browser (Firefox + Chrome) extension that translates the audio of videos on the current page using OpenAI and outputs subtitles.
+Build a cross-browser (Firefox + Chrome) extension that translates the audio of videos on the current page using OpenAI and outputs subtitles.
+
+## Current Focus (Phase 1)
+Implement and verify the first goal only:
+- Detect video elements on the active tab (including HTML5 video).
+
+## Current Status
+- Project scaffold created (`manifest.json`, `background.js`, `content.js`, `popup.html`, `popup.js`, `popup.css`).
+- Implemented popup-triggered scan of the active tab.
+- Implemented video metadata detection and popup result display.
+- Added browser-specific manifests: `manifest.firefox.json` and `manifest.chrome.json`.
+- Added `switch-manifest.ps1` to switch the active `manifest.json` for local testing.
+- OpenAI/audio capture is not implemented yet.
 
 ## Goals
 - Detect video elements on the active tab (including HTML5 video).
@@ -7,47 +19,55 @@ Build a cross‑browser (Firefox + Chrome) extension that translates the audio o
 - Send audio to an OpenAI translation endpoint and receive timed text.
 - Render subtitles on top of the video or provide a subtitle track.
 
-## Non‑Goals (for now)
+## Non-Goals (for now)
 - Full offline transcription/translation.
-- Support for DRM‑protected media.
+- Support for DRM-protected media.
 - Advanced subtitle editing UI.
 
 ## Target Browsers
 - Chrome (Manifest V3).
 - Firefox (Manifest V3 where supported; otherwise MV2 fallback if needed).
 
-## Key Components
-- `manifest.json`: permissions, content scripts, background service worker.
-- Background worker: handles OpenAI API calls and streaming.
-- Content script: injects subtitle renderer overlay.
-- UI (popup/options): API key configuration, language selection, start/stop.
+## Key Components (initial)
+- `manifest.json`: active manifest used by the browser during local testing.
+- `manifest.firefox.json`: Firefox dev manifest (`background.scripts`).
+- `manifest.chrome.json`: Chrome MV3 manifest (`background.service_worker`).
+- Content script: scans the page for `video` elements and reports metadata.
+- Background worker: coordinates extension actions and future API calls.
+- Popup UI: trigger scan and show detected videos.
 
-## Permissions (initial guess)
-- `activeTab`, `scripting`, `storage`, `tabs`
-- `tabCapture` or `offscreen` (Chrome) / `tabCapture` (Firefox)
-- `webRequest` only if needed for special cases
+## Permissions (Phase 1)
+- `activeTab`
+- `scripting`
+- `tabs`
 
-## Data Flow (initial)
-1. User clicks "Translate Video" in the extension.
-2. Extension captures tab audio.
-3. Audio is chunked and sent to OpenAI.
-4. Returned translation with timing is stored.
-5. Content script overlays subtitles on the video.
+## Local Dev Notes
+- Firefox (current `web-ext` compatibility): use `manifest.firefox.json`.
+- Chrome MV3: use `manifest.chrome.json`.
+- Switch active manifest with:
+  - `.\switch-manifest.ps1 firefox`
+  - `.\switch-manifest.ps1 chrome`
+
+## Data Flow (Phase 1: Video Detection)
+1. User clicks the extension popup and selects "Scan Videos".
+2. Background script injects `content.js` into the active tab using `scripting.executeScript`.
+3. Content script finds all visible `video` elements on the page.
+4. Content script returns metadata (index, src/currentSrc, duration, size, paused state).
+5. Popup displays the detected video list.
 
 ## Security & Privacy
-- API key stored in extension storage (local only).
-- Minimize data retention; do not log raw audio.
-- Provide a clear disclosure in the UI.
+- No audio capture or upload in Phase 1.
+- No OpenAI API calls in Phase 1.
+- Keep page inspection local to the browser.
 
-## Initial Milestones
-1. Scaffolding: manifest + background + content + popup.
-2. Simple audio capture and mock subtitles overlay.
-3. Real OpenAI request wired up.
-4. Subtitle timing and sync improvements.
-5. Packaging for Chrome and Firefox.
+## Initial Milestones (reordered)
+1. Scaffolding: manifest + background + content + popup. (Done)
+2. Video detection on active tab and popup display. (Done)
+3. Select target video for future translation flow.
+4. Audio capture prototype and mock subtitles overlay.
+5. Real OpenAI request and subtitle timing pipeline.
 
 ## Assumptions / Open Questions
-- Which OpenAI endpoint to use for translation (speech‑to‑text + translate).
-- Expected latency and buffering strategy.
-- Subtitle format preference (WebVTT vs custom overlay).
-
+- How to handle pages with multiple videos (selection UI vs auto-pick).
+- Whether iframe-hosted videos are in scope for Phase 1.
+- Minimum metadata needed before audio capture integration.
