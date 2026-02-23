@@ -177,7 +177,12 @@
   function formatCueWindowText(cues, nowRelativeSeconds) {
     const active = cues.filter((cue) => nowRelativeSeconds >= cue.start && nowRelativeSeconds <= cue.end);
     if (active.length === 0) {
-      return "";
+      // Keep the most recent cue briefly to reduce flicker between chunk boundaries.
+      const recent = cues
+        .filter((cue) => nowRelativeSeconds > cue.end && nowRelativeSeconds - cue.end <= 0.9)
+        .sort((a, b) => b.end - a.end)
+        .slice(0, 1);
+      return recent.length ? recent[0].text : "";
     }
     return active.map((cue) => cue.text).join("\n");
   }
@@ -325,11 +330,21 @@
       effectiveOffsetSeconds = Number(video.currentTime || 0) - cueSpanEnd + (Number(displayLeadSeconds) || 0);
     }
 
-    const absoluteCues = relativeCues.map((cue) => ({
-      start: cue.start + effectiveOffsetSeconds,
-      end: cue.end + effectiveOffsetSeconds,
-      text: cue.text
-    }));
+    const absoluteCues = relativeCues.map((cue) => {
+      const start = cue.start + effectiveOffsetSeconds;
+      let end = cue.end + effectiveOffsetSeconds;
+
+      if (liveAlignToNow) {
+        // Backend chunks often come back with short cue windows; extend slightly for readability.
+        end = Math.max(end, start + 1.2);
+      }
+
+      return {
+        start,
+        end,
+        text: cue.text
+      };
+    });
 
     const state = ensureOverlayState(video);
     const nextCues = replace ? absoluteCues : state.cues.concat(absoluteCues);
@@ -407,12 +422,14 @@
     }
 
     const capturedStream = captureStreamFn.call(video);
-    const audioTracks = capturedStream.getAudioTracks();
-    if (!audioTracks.length) {
+    const capturedAudioTracks = capturedStream.getAudioTracks();
+    if (!capturedAudioTracks.length) {
       throw new Error("No audio track detected on the selected video. Play the video first and try again.");
     }
 
-    const audioStream = new MediaStream(audioTracks);
+    // Record from cloned tracks so stopping the recorder does not stop the video's own audio output.
+    const clonedAudioTracks = capturedAudioTracks.map((track) => track.clone());
+    const audioStream = new MediaStream(clonedAudioTracks);
     const chunks = [];
     const mimeType = pickSupportedAudioMimeType();
     const recorder = mimeType ? new MediaRecorder(audioStream, { mimeType }) : new MediaRecorder(audioStream);
@@ -420,12 +437,10 @@
     const videoCurrentTimeStart = Number(video.currentTime || 0);
 
     const stopAllTracks = () => {
-      for (const track of capturedStream.getTracks()) {
-        track.stop();
-      }
       for (const track of audioStream.getTracks()) {
         track.stop();
       }
+      // Do not stop capturedStream tracks here; in Firefox this can interrupt page audio playback.
     };
 
     const recordedBlob = await new Promise((resolve, reject) => {

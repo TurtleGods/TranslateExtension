@@ -378,19 +378,11 @@ async function startLiveTranslationOnActiveTab(payload = {}) {
   clearSubtitleOverlayOnTab({ tabId, videoIndex: selectedVideoIndex }).catch(() => {});
 
   (async () => {
-    try {
-      while (!state.stopRequested) {
-        await executeContentScript(tabId);
-        const capture = await sendTabMessage(tabId, {
-          type: "CAPTURE_VIDEO_AUDIO_SAMPLE",
-          videoIndex: state.videoIndex,
-          durationMs: state.durationMs
-        });
+    const pendingChunkTasks = new Set();
+    let chunkSequence = 0;
 
-        if (!capture?.ok) {
-          throw new Error(capture?.error || "Failed to capture video audio sample.");
-        }
-
+    const scheduleChunkProcessing = (capture, seq) => {
+      const task = (async () => {
         const backend = await requestTimedTextFromBackend({
           audioBase64: capture.audioBase64,
           mimeType: capture.mimeType,
@@ -404,7 +396,7 @@ async function startLiveTranslationOnActiveTab(payload = {}) {
           videoIndex: state.videoIndex,
           result: backend?.result,
           offsetSeconds: capture.videoCurrentTimeStart || 0,
-          replace: state.chunkIndex === 0,
+          replace: false,
           liveAlignToNow: true,
           displayLeadSeconds: 0.6
         });
@@ -413,12 +405,45 @@ async function startLiveTranslationOnActiveTab(payload = {}) {
         state.lastUpdatedAt = new Date().toISOString();
         state.lastError = "";
         state.lastOverlayCueCount = overlay?.totalCueCount || overlay?.cueCount || 0;
+        state.lastProcessedChunkSequence = seq;
+      })()
+        .catch((error) => {
+          state.lastError = error?.message || String(error);
+          state.lastUpdatedAt = new Date().toISOString();
+          state.stopRequested = true;
+          console.error("[translate-extension] live translation chunk failed:", error);
+        })
+        .finally(() => {
+          pendingChunkTasks.delete(task);
+        });
+
+      pendingChunkTasks.add(task);
+    };
+
+    try {
+      while (!state.stopRequested) {
+        await executeContentScript(tabId);
+        const capture = await sendTabMessage(tabId, {
+          type: "CAPTURE_VIDEO_AUDIO_SAMPLE",
+          videoIndex: state.videoIndex,
+          durationMs: state.durationMs
+        });
+
+        if (!capture?.ok) {
+          throw new Error(capture?.error || "Failed to capture video audio sample.");
+        }
+
+        scheduleChunkProcessing(capture, chunkSequence);
+        chunkSequence += 1;
       }
     } catch (error) {
       state.lastError = error?.message || String(error);
       state.lastUpdatedAt = new Date().toISOString();
       console.error("[translate-extension] live translation stopped with error:", error);
     } finally {
+      if (pendingChunkTasks.size > 0) {
+        await Promise.allSettled(Array.from(pendingChunkTasks));
+      }
       state.running = false;
       state.stopRequested = true;
     }
