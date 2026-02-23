@@ -34,6 +34,7 @@ Thumbs.db
 !.vscode/extensions.json
 !.vscode/settings.json
 .idea/
+.venv/
 *.swp
 *.swo
 
@@ -49,3 +50,4 @@ web-ext-artifacts/
 # Local certs / keys (if used for dev testing)
 *.pem
 *.key
+.env*
