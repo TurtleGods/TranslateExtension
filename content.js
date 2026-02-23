@@ -174,6 +174,34 @@
     return [];
   }
 
+  function normalizeCueTextForCompare(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/[.,!?;:()[\]{}"'`~\-]/g, "")
+      .trim();
+  }
+
+  function trimLeadingRelativeCues(cues, trimLeadingSeconds = 0) {
+    const trim = Math.max(0, Number(trimLeadingSeconds) || 0);
+    if (!trim) {
+      return cues;
+    }
+
+    return cues
+      .map((cue) => ({
+        ...cue,
+        start: Math.max(0, cue.start),
+        end: Math.max(0, cue.end)
+      }))
+      .filter((cue) => cue.end > trim)
+      .map((cue) => ({
+        ...cue,
+        start: Math.max(cue.start, trim)
+      }))
+      .filter((cue) => cue.end > cue.start);
+  }
+
   function formatCueWindowText(cues, nowRelativeSeconds) {
     const active = cues.filter((cue) => nowRelativeSeconds >= cue.start && nowRelativeSeconds <= cue.end);
     if (active.length === 0) {
@@ -358,6 +386,7 @@
     result,
     offsetSeconds = 0,
     replace = false,
+    trimLeadingSeconds = 0,
     liveAlignToNow = false,
     displayLeadSeconds = 0.4
   }) {
@@ -371,13 +400,24 @@
       throw new Error("Selected video was not found for subtitle overlay.");
     }
 
-    const relativeCues = normalizeCuesFromBackend(result);
-    if (!relativeCues.length) {
+    const rawRelativeCues = normalizeCuesFromBackend(result);
+    if (!rawRelativeCues.length) {
       throw new Error("No subtitle cues found in backend response.");
+    }
+    const relativeCues = trimLeadingRelativeCues(rawRelativeCues, trimLeadingSeconds);
+
+    let effectiveOffsetSeconds = Number(offsetSeconds) || 0;
+    const state = ensureOverlayState(video);
+    if (!relativeCues.length) {
+      return {
+        ok: true,
+        videoIndex,
+        cueCount: 0,
+        totalCueCount: state.cues.length
+      };
     }
 
     const cueSpanEnd = relativeCues.reduce((max, cue) => Math.max(max, Number(cue.end) || 0), 0);
-    let effectiveOffsetSeconds = Number(offsetSeconds) || 0;
 
     if (liveAlignToNow) {
       // For near-real-time mode, shift the returned chunk close to "now" so backend latency
@@ -401,13 +441,17 @@
       };
     });
 
-    const state = ensureOverlayState(video);
     const nextCues = replace ? absoluteCues : state.cues.concat(absoluteCues);
     nextCues.sort((a, b) => (a.start - b.start) || (a.end - b.end));
 
     const deduped = [];
     for (const cue of nextCues) {
       const prev = deduped[deduped.length - 1];
+      const prevNorm = prev ? normalizeCueTextForCompare(prev.text) : "";
+      const cueNorm = normalizeCueTextForCompare(cue.text);
+      const overlapsInTime = prev
+        ? (Math.min(prev.end, cue.end) - Math.max(prev.start, cue.start)) > 0.15
+        : false;
       if (
         prev &&
         Math.abs(prev.start - cue.start) < 0.001 &&
@@ -416,6 +460,13 @@
       ) {
         continue;
       }
+
+      if (prev && prevNorm && cueNorm && prevNorm === cueNorm && overlapsInTime) {
+        // Prefer the most recent chunk's timing in overlap windows.
+        deduped[deduped.length - 1] = cue;
+        continue;
+      }
+
       deduped.push(cue);
     }
 
@@ -625,6 +676,7 @@
             result: message.result,
             offsetSeconds: message.offsetSeconds,
             replace: !!message.replace,
+            trimLeadingSeconds: message.trimLeadingSeconds,
             liveAlignToNow: !!message.liveAlignToNow,
             displayLeadSeconds: message.displayLeadSeconds
           })

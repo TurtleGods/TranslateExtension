@@ -279,6 +279,7 @@ async function renderSubtitleOverlayOnActiveTab({
   result,
   offsetSeconds,
   replace,
+  trimLeadingSeconds,
   liveAlignToNow,
   displayLeadSeconds
 }) {
@@ -293,6 +294,7 @@ async function renderSubtitleOverlayOnActiveTab({
     result,
     offsetSeconds,
     replace,
+    trimLeadingSeconds,
     liveAlignToNow,
     displayLeadSeconds
   });
@@ -409,6 +411,8 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
     };
   }
 
+  const segmentDurationMs = Math.max(1000, Number(payload.durationMs) || 60000);
+
   const state = {
     running: true,
     stopRequested: false,
@@ -416,7 +420,8 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
     finishedReason: "",
     tabId,
     videoIndex: selectedVideoIndex,
-    segmentDurationMs: Math.max(1000, Number(payload.durationMs) || 60000),
+    segmentDurationMs,
+    overlapSeconds: 0,
     mode: payload.mode || "translate_to_english",
     sourceLanguage: payload.sourceLanguage || "",
     targetLanguage: payload.targetLanguage || "",
@@ -452,7 +457,8 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
           videoIndex: capture.selectedVideoIndex,
           result: backend?.result,
           offsetSeconds: capture.videoCurrentTimeStart || 0,
-          replace: false
+          replace: false,
+          trimLeadingSeconds: 0
         });
 
         state.completedSegments = Math.max(state.completedSegments, segmentIndex + 1);
@@ -507,6 +513,7 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
         if (noProgress) {
           throw new Error("Video playback did not advance during capture. Keep the video playing and this tab active.");
         }
+
       }
     } catch (error) {
       state.lastError = error?.message || String(error);
@@ -540,7 +547,8 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
     started: true,
     tabId,
     videoIndex: selectedVideoIndex,
-    segmentDurationMs: state.segmentDurationMs
+    segmentDurationMs: state.segmentDurationMs,
+    overlapSeconds: state.overlapSeconds
   };
 }
 
@@ -585,6 +593,7 @@ async function getContinuous60sTranslationStatusForActiveTab() {
     finishedReason: state.finishedReason || "",
     lastError: state.lastError || "",
     segmentDurationMs: state.segmentDurationMs,
+    overlapSeconds: Number(state.overlapSeconds || 0),
     capturedSegments: Number(state.capturedSegments || 0),
     completedSegments: Number(state.completedSegments || 0),
     lastOverlayCueCount: Number(state.lastOverlayCueCount || 0),
@@ -1054,3 +1063,4 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+

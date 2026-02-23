@@ -100,10 +100,22 @@ def _translate_segments_with_text_model(
     raise RuntimeError("Failed to parse segment translation JSON from OpenAI.") from exc
 
   translations = parsed.get("translations", []) if isinstance(parsed, dict) else []
-  if not isinstance(translations, list) or len(translations) != len(segments):
-    raise RuntimeError("Segment translation count mismatch.")
+  if not isinstance(translations, list):
+    raise RuntimeError("Segment translation payload is not a list.")
 
-  return {
+  recovered_count_mismatch = len(translations) != len(segments)
+  if recovered_count_mismatch:
+    # Keep the chunk flowing even if the text model merges/splits items.
+    # We preserve array length by truncating extras and falling back to source text for missing entries.
+    normalized_translations: list[str] = []
+    for index, segment in enumerate(segments):
+      if index < len(translations):
+        normalized_translations.append(str(translations[index] or "").strip())
+      else:
+        normalized_translations.append(str(segment.get("text", "") or ""))
+    translations = normalized_translations
+
+  result = {
     "enabled": True,
     "model": config.models.text_translate,
     "targetLanguage": target_language,
@@ -115,6 +127,11 @@ def _translate_segments_with_text_model(
       for index, segment in enumerate(segments)
     ],
   }
+
+  if recovered_count_mismatch:
+    result["warning"] = "Segment translation count mismatch recovered by padding/truncating."
+
+  return result
 
 
 def create_timed_text_from_audio(

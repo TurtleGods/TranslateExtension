@@ -142,6 +142,7 @@ async function onScanClick() {
 }
 
 async function onTranslateClick() {
+  console.log("Translate button clicked");
   translateButton.disabled = true;
   stopTranslateButton.disabled = true;
   scanButton.disabled = true;

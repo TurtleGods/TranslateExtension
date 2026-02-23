@@ -7,7 +7,7 @@ Implement and verify the first goal only:
 
 ## Current Direction (Prototype Evolution)
 - Move from single-shot / short live subtitle experiments to "whole-video during page lifetime" subtitle generation.
-- Process audio in fixed `60s` segments with overlap (planned default overlap: `5s`) for better subtitle stitching quality.
+- Process audio in fixed `60s` segments; overlap remains a planned refinement (default candidate: `5s`) for better subtitle stitching quality, but do not rewind visible playback after each chunk to simulate overlap.
 - Build subtitles progressively across the full video timeline (e.g. `0-60`, `55-120`, `115-180`, ... until video end).
 - Keep accumulated subtitle cues in session memory during processing, and checkpoint progress locally for recovery/export.
 
@@ -22,7 +22,7 @@ Implement and verify the first goal only:
 - Added backend `.env` config pattern for API key (`server/.env.example`).
 - Added background message placeholder to send audio bytes to the backend (`REQUEST_TIMED_TEXT_FROM_BACKEND`).
 - Added prototype audio capture and subtitle overlay rendering experiments (browser behavior varies by site/browser).
-- Added continuous chunk-based translation prototype flow in extension background/popup.
+- Added continuous chunk-based translation prototype flow in extension background/popup (currently sequential chunks without seek-back overlap to avoid rewinding playback).
 - Current subtitle accumulation needs overlap-aware stitching/dedup improvements for full-video quality.
 - Firefox `video.captureStream()` audio behavior is unreliable on some sites (can mute page audio); Chrome testing is preferred for translation prototypes.
 
@@ -84,7 +84,7 @@ Implement and verify the first goal only:
 
 ## Data Flow (Prototype: Whole Video Chunk Translation)
 1. User scans/selects a target video and starts continuous translation.
-2. Background coordinates repeated audio capture in `60s` chunks (with planned overlap, e.g. `5s`).
+2. Background coordinates repeated audio capture in sequential `60s` chunks. Overlap (e.g. `5s`) remains planned, but current prototype does not seek the visible video backward after each chunk.
 3. Each chunk is sent to local backend (`/api/openai/audio/timed-text`) for timed text generation.
 4. Extension converts chunk-relative timestamps to absolute video timeline timestamps.
 5. Extension stitches/merges overlapping cues and stores accumulated subtitle data in memory (and local persistence/checkpoints).
@@ -110,6 +110,7 @@ Implement and verify the first goal only:
 - Minimum metadata needed before audio capture integration.
 - When to clear stored video selection (tab reload, URL change, manual reset).
 - Whether to use direct OpenAI audio translation (English-only) or transcription + text translation for target-language subtitles.
-- Exact overlap window for chunk stitching (`5s` default candidate) and merge heuristics before escalating to AI-assisted merge.
+- Exact overlap window for chunk stitching (`5s` default candidate), merge heuristics, and a non-playback-rewinding implementation strategy before escalating to AI-assisted merge.
 - Storage strategy tradeoffs (`storage.local` vs IndexedDB) for long videos and checkpoint frequency.
 - Whether to auto-rewind for subtitle review after processing or keep current playback position and store cues only.
+
