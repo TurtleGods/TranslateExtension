@@ -9,8 +9,20 @@
   <body>
     <main class="popup">
       <h1>Video Detector</h1>
+      <label class="field">
+        <span class="field-label">Result Language</span>
+        <select id="resultLanguageSelect">
+          <option value="zh-TW" selected>Chinese (Traditional)</option>
+          <option value="en">English</option>
+        </select>
+      </label>
       <button id="scanButton" type="button">Scan Videos</button>
+      <button id="translateButton" type="button" class="secondary">Start Translate (6s sample)</button>
       <p id="status" class="status" aria-live="polite">Ready.</p>
+      <section>
+        <h2>Prototype Result</h2>
+        <pre id="translationOutput" class="output">No translation request yet.</pre>
+      </section>
       <section>
         <h2>Detected Videos</h2>
         <ul id="results" class="results"></ul>

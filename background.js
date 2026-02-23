@@ -178,6 +178,44 @@ async function setActiveTabTargetVideo(videoIndex) {
   };
 }
 
+async function captureSelectedVideoAudioSampleOnActiveTab(options = {}) {
+  const tab = await queryActiveTab();
+
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+
+  if (!isSupportedTab(tab)) {
+    throw new Error("Open a regular http/https page to capture video audio.");
+  }
+
+  const selectedVideoIndex = await getSelectedVideoIndexForTab(tab.id);
+  if (!Number.isInteger(selectedVideoIndex) || selectedVideoIndex < 0) {
+    throw new Error("No selected video for this tab. Scan and select a video first.");
+  }
+
+  await executeContentScript(tab.id);
+  const response = await sendTabMessage(tab.id, {
+    type: "CAPTURE_VIDEO_AUDIO_SAMPLE",
+    videoIndex: selectedVideoIndex,
+    durationMs: options.durationMs
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to capture video audio sample.");
+  }
+
+  return {
+    tab: {
+      id: tab.id,
+      title: tab.title || "",
+      url: tab.url || ""
+    },
+    selectedVideoIndex,
+    ...response
+  };
+}
+
 function base64ToUint8Array(base64) {
   const binaryString = globalThis.atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -269,6 +307,40 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "REQUEST_TIMED_TEXT_FROM_BACKEND") {
     requestTimedTextFromBackend(message.payload || {})
       .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+
+    return true;
+  }
+
+  if (message?.type === "START_SELECTED_VIDEO_TRANSLATION_PROTOTYPE") {
+    captureSelectedVideoAudioSampleOnActiveTab({
+      durationMs: message.payload?.durationMs
+    })
+      .then(async (capture) => {
+        const backend = await requestTimedTextFromBackend({
+          audioBase64: capture.audioBase64,
+          mimeType: capture.mimeType,
+          mode: message.payload?.mode || "translate_to_english",
+          sourceLanguage: message.payload?.sourceLanguage || "",
+          targetLanguage: message.payload?.targetLanguage || ""
+        });
+
+        sendResponse({
+          ok: true,
+          data: {
+            capture: {
+              capturedAt: capture.capturedAt,
+              bytes: capture.bytes,
+              mimeType: capture.mimeType,
+              durationMsRequested: capture.durationMsRequested,
+              durationMsActual: capture.durationMsActual,
+              selectedVideoIndex: capture.selectedVideoIndex,
+              tab: capture.tab
+            },
+            backend
+          }
+        });
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
 
     return true;

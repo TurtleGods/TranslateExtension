@@ -1,8 +1,11 @@
 const extApi = globalThis.browser ?? globalThis.chrome;
 
 const scanButton = document.getElementById("scanButton");
+const translateButton = document.getElementById("translateButton");
+const resultLanguageSelect = document.getElementById("resultLanguageSelect");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
+const translationOutputEl = document.getElementById("translationOutput");
 let lastScanData = null;
 
 function setStatus(text) {
@@ -11,6 +14,44 @@ function setStatus(text) {
 
 function clearResults() {
   resultsEl.innerHTML = "";
+}
+
+function setTranslationOutput(value) {
+  translationOutputEl.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function getSelectedResultLanguage() {
+  return String(resultLanguageSelect?.value || "zh-TW");
+}
+
+function formatBackendResultForOutput(backend) {
+  const result = backend?.result;
+  if (!result) {
+    return backend || {};
+  }
+
+  if (result.format === "vtt") {
+    return result.timedText || "(empty VTT response)";
+  }
+
+  if (result.format === "segments") {
+    const translatedSegments = result?.translation?.enabled ? result.translation.segments : null;
+    if (Array.isArray(translatedSegments) && translatedSegments.length) {
+      return translatedSegments
+        .map((segment) => `${segment.start?.toFixed?.(2) ?? segment.start} --> ${segment.end?.toFixed?.(2) ?? segment.end}\n${segment.translatedText || segment.text || ""}`)
+        .join("\n\n");
+    }
+
+    if (Array.isArray(result.segments) && result.segments.length) {
+      return result.segments
+        .map((segment) => `${segment.start?.toFixed?.(2) ?? segment.start} --> ${segment.end?.toFixed?.(2) ?? segment.end}\n${segment.text || ""}`)
+        .join("\n\n");
+    }
+
+    return result.transcriptText || "(empty transcript response)";
+  }
+
+  return backend;
 }
 
 function addResultItem(html, options = {}) {
@@ -124,7 +165,55 @@ async function onScanClick() {
   }
 }
 
+async function onTranslateClick() {
+  translateButton.disabled = true;
+  scanButton.disabled = true;
+  resultLanguageSelect.disabled = true;
+  const resultLanguage = getSelectedResultLanguage();
+  setStatus(`Capturing selected video audio sample and sending to backend (${resultLanguage})...`);
+  setTranslationOutput("Running prototype...");
+
+  try {
+    const isEnglish = resultLanguage === "en";
+    const response = await sendRuntimeMessage({
+      type: "START_SELECTED_VIDEO_TRANSLATION_PROTOTYPE",
+      payload: {
+        durationMs: 6000,
+        mode: isEnglish ? "translate_to_english" : "transcribe",
+        targetLanguage: isEnglish ? "" : resultLanguage
+      }
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Prototype translation failed.");
+    }
+
+    const data = response.data || {};
+    const backendResult = data.backend?.result || {};
+    setTranslationOutput(formatBackendResultForOutput(data.backend));
+
+    if (!isEnglish && backendResult?.translation?.enabled !== true) {
+      setStatus(
+        "Request completed, but Chinese translation is not enabled on backend. Set ENABLE_TEXT_SEGMENT_TRANSLATION=true in server/.env."
+      );
+      return;
+    }
+
+    setStatus(
+      `Captured ${data.capture?.bytes || 0} bytes from video ${Number(data.capture?.selectedVideoIndex) + 1} and received ${backendResult.format || "backend"} output.`
+    );
+  } catch (error) {
+    setStatus(`Error: ${error.message || String(error)}`);
+    setTranslationOutput(`Error: ${error.message || String(error)}`);
+  } finally {
+    translateButton.disabled = false;
+    scanButton.disabled = false;
+    resultLanguageSelect.disabled = false;
+  }
+}
+
 scanButton.addEventListener("click", onScanClick);
+translateButton.addEventListener("click", onTranslateClick);
 resultsEl.addEventListener("click", async (event) => {
   const button = event.target.closest('button[data-action="select-video"]');
   if (!button) {
