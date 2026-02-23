@@ -5,6 +5,12 @@ Build a cross-browser (Firefox + Chrome) extension that translates the audio of 
 Implement and verify the first goal only:
 - Detect video elements on the active tab (including HTML5 video).
 
+## Current Direction (Prototype Evolution)
+- Move from single-shot / short live subtitle experiments to "whole-video during page lifetime" subtitle generation.
+- Process audio in fixed `60s` segments with overlap (planned default overlap: `5s`) for better subtitle stitching quality.
+- Build subtitles progressively across the full video timeline (e.g. `0-60`, `55-120`, `115-180`, ... until video end).
+- Keep accumulated subtitle cues in session memory during processing, and checkpoint progress locally for recovery/export.
+
 ## Current Status
 - Project scaffold created (`manifest.json`, `background.js`, `content.js`, `popup.html`, `popup.js`, `popup.css`).
 - Implemented popup-triggered scan of the active tab.
@@ -15,14 +21,18 @@ Implement and verify the first goal only:
 - Added local backend proxy scaffold in `server/` for OpenAI timed-text processing.
 - Added backend `.env` config pattern for API key (`server/.env.example`).
 - Added background message placeholder to send audio bytes to the backend (`REQUEST_TIMED_TEXT_FROM_BACKEND`).
-- Audio capture from the tab is still not implemented.
-- Subtitle rendering is still not implemented.
+- Added prototype audio capture and subtitle overlay rendering experiments (browser behavior varies by site/browser).
+- Added continuous chunk-based translation prototype flow in extension background/popup.
+- Current subtitle accumulation needs overlap-aware stitching/dedup improvements for full-video quality.
+- Firefox `video.captureStream()` audio behavior is unreliable on some sites (can mute page audio); Chrome testing is preferred for translation prototypes.
 
 ## Goals
 - Detect video elements on the active tab (including HTML5 video).
 - Capture audio from the video (tab audio capture).
 - Send audio to an OpenAI translation endpoint and receive timed text.
 - Render subtitles on top of the video or provide a subtitle track.
+- Stitch chunked subtitle results into a coherent full-video subtitle timeline during page lifetime.
+- Persist in-progress subtitle data locally (session memory + local persistence) so progress survives UI/popup closure.
 
 ## Non-Goals (for now)
 - Full offline transcription/translation.
@@ -41,6 +51,11 @@ Implement and verify the first goal only:
 - Background worker: coordinates extension actions and future API calls.
 - Popup UI: trigger scan and show detected videos.
 - `server/`: local backend proxy for OpenAI audio transcription/translation requests.
+
+## Key Components (prototype additions)
+- Chunk scheduler (extension background): captures sequential `60s` segments and coordinates backend requests.
+- Subtitle stitcher (extension, planned refinement): merges overlapping chunk outputs (e.g. `5s` overlap) and removes duplicates.
+- Subtitle store (extension, planned refinement): in-memory runtime state plus local persistence (prefer IndexedDB for larger jobs).
 
 ## Permissions (Phase 1)
 - `activeTab`
@@ -67,17 +82,27 @@ Implement and verify the first goal only:
 6. User selects one video as the future translation target.
 7. Background script stores the selected video index per tab in extension storage.
 
+## Data Flow (Prototype: Whole Video Chunk Translation)
+1. User scans/selects a target video and starts continuous translation.
+2. Background coordinates repeated audio capture in `60s` chunks (with planned overlap, e.g. `5s`).
+3. Each chunk is sent to local backend (`/api/openai/audio/timed-text`) for timed text generation.
+4. Extension converts chunk-relative timestamps to absolute video timeline timestamps.
+5. Extension stitches/merges overlapping cues and stores accumulated subtitle data in memory (and local persistence/checkpoints).
+6. Content script renders/upgrades subtitle overlay from the accumulated cue set.
+7. Processing continues until the video ends, the page/tab is left, or the user stops translation.
+
 ## Security & Privacy
 - Phase 1 page inspection stays local to the browser.
 - OpenAI API key should be stored in `server/.env` (backend), not in the extension.
-- Current backend scaffold supports OpenAI audio requests, but extension audio capture/upload trigger is not wired yet.
+- Backend remains a stateless proxy for audio->timed text requests; subtitle stitching/persistence logic stays in the extension.
 
 ## Initial Milestones (reordered)
 1. Scaffolding: manifest + background + content + popup. (Done)
 2. Video detection on active tab and popup display. (Done)
 3. Select target video for future translation flow. (Done)
-4. Audio capture prototype and mock subtitles overlay.
-5. Real OpenAI request and subtitle timing pipeline. (Backend scaffolded; extension capture/render pending)
+4. Audio capture prototype and mock subtitles overlay. (Prototype in progress)
+5. Real OpenAI request and subtitle timing pipeline. (Backend + extension prototype in progress)
+6. Overlap-aware chunk stitching and persistent subtitle accumulation for whole-video processing. (Planned)
 
 ## Assumptions / Open Questions
 - How to handle pages with multiple videos (selection UI vs auto-pick).
@@ -85,3 +110,6 @@ Implement and verify the first goal only:
 - Minimum metadata needed before audio capture integration.
 - When to clear stored video selection (tab reload, URL change, manual reset).
 - Whether to use direct OpenAI audio translation (English-only) or transcription + text translation for target-language subtitles.
+- Exact overlap window for chunk stitching (`5s` default candidate) and merge heuristics before escalating to AI-assisted merge.
+- Storage strategy tradeoffs (`storage.local` vs IndexedDB) for long videos and checkpoint frequency.
+- Whether to auto-rewind for subtitle review after processing or keep current playback position and store cues only.
