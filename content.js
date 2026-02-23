@@ -214,7 +214,7 @@
     Object.assign(box.style, {
       position: "absolute",
       left: "50%",
-      top: "50%",
+      top: "80%",
       transform: "translate(-50%, -50%)",
       maxWidth: "92%",
       padding: "0.45em 0.8em",
@@ -530,6 +530,9 @@
     });
 
     const audioBase64 = await blobToBase64(recordedBlob);
+    const videoCurrentTimeEnd = Number(video.currentTime || 0);
+    const videoDuration = Number.isFinite(video.duration) ? Number(video.duration) : null;
+    const videoEnded = !!video.ended || (videoDuration != null && videoCurrentTimeEnd >= Math.max(0, videoDuration - 0.25));
 
     return {
       ok: true,
@@ -540,7 +543,10 @@
       bytes: recordedBlob.size,
       mimeType: recordedBlob.type || mimeType || "audio/webm",
       audioBase64,
-      videoCurrentTimeStart
+      videoCurrentTimeStart,
+      videoCurrentTimeEnd,
+      videoDuration,
+      videoEnded
     };
   }
 
@@ -560,6 +566,37 @@
       ok: true,
       videoIndex,
       ...result
+    };
+  }
+
+  async function seekVideoPlayback({ videoIndex, currentTime, play = true }) {
+    if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+      throw new Error("Invalid video index for seek.");
+    }
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos[videoIndex];
+    if (!video) {
+      throw new Error("Selected video was not found for seek.");
+    }
+
+    const targetTime = Number(currentTime);
+    if (!Number.isFinite(targetTime) || targetTime < 0) {
+      throw new Error("Invalid seek time.");
+    }
+
+    video.currentTime = targetTime;
+    if (play) {
+      try {
+        await video.play();
+      } catch {}
+    }
+
+    return {
+      ok: true,
+      videoIndex,
+      currentTime: video.currentTime,
+      playing: !video.paused
     };
   }
 
@@ -609,6 +646,17 @@
 
     if (message?.type === "RELEASE_VIDEO_AUDIO_CAPTURE") {
       releaseVideoAudioCapture({ videoIndex: message.videoIndex })
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+      return true;
+    }
+
+    if (message?.type === "SEEK_VIDEO_PLAYBACK") {
+      seekVideoPlayback({
+        videoIndex: message.videoIndex,
+        currentTime: message.currentTime,
+        play: message.play !== false
+      })
         .then((result) => sendResponse(result))
         .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
       return true;

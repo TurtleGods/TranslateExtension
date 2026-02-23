@@ -3,14 +3,17 @@ const extApi = globalThis.browser ?? globalThis.chrome;
 const scanButton = document.getElementById("scanButton");
 const translateButton = document.getElementById("translateButton");
 const stopTranslateButton = document.getElementById("stopTranslateButton");
+const hideSubtitlesButton = document.getElementById("hideSubtitlesButton");
 const resultLanguageSelect = document.getElementById("resultLanguageSelect");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
 let lastScanData = null;
-let liveStatusPollTimer = 0;
+let continuousStatusPollTimer = 0;
 
 function setStatus(text) {
-  statusEl.textContent = text;
+  if (statusEl) {
+    statusEl.textContent = text;
+  }
 }
 
 function clearResults() {
@@ -60,7 +63,7 @@ function sendRuntimeMessage(message) {
   });
 }
 
-function setLiveControlState({ running }) {
+function setContinuousControls({ running }) {
   translateButton.disabled = !!running;
   stopTranslateButton.disabled = !running;
   resultLanguageSelect.disabled = !!running;
@@ -113,7 +116,7 @@ async function onSelectVideo(videoIndex) {
     renderResults(lastScanData);
   }
 
-  setStatus(`Selected video ${videoIndex + 1} for live translation.`);
+  setStatus(`Selected video ${videoIndex + 1} for continuous translation (60s chunks).`);
 }
 
 async function onScanClick() {
@@ -138,74 +141,41 @@ async function onScanClick() {
   }
 }
 
-async function refreshLiveTranslationStatus() {
-  const response = await sendRuntimeMessage({ type: "GET_SELECTED_VIDEO_TRANSLATION_LIVE_STATUS" });
-  if (!response?.ok) {
-    throw new Error(response?.error || "Failed to get live translation status.");
-  }
-
-  const data = response.data || {};
-  const running = !!data.running && !data.stopRequested;
-  setLiveControlState({ running });
-
-  if (running) {
-    setStatus(
-      `Live translating... chunks: ${Number(data.chunkIndex || 0)}, overlay cues: ${Number(data.lastOverlayCueCount || 0)}`
-    );
-  } else if (data.lastError) {
-    setStatus(`Live translation stopped: ${data.lastError}`);
-  }
-
-  return data;
-}
-
-function ensureLiveStatusPolling() {
-  if (liveStatusPollTimer) {
-    return;
-  }
-
-  liveStatusPollTimer = globalThis.setInterval(() => {
-    refreshLiveTranslationStatus().catch((error) => {
-      setStatus(`Status error: ${error.message || String(error)}`);
-    });
-  }, 1500);
-}
-
 async function onTranslateClick() {
   translateButton.disabled = true;
   stopTranslateButton.disabled = true;
   scanButton.disabled = true;
 
   const resultLanguage = getSelectedResultLanguage();
-  setStatus(`Starting live translation (${resultLanguage})...`);
+  const isEnglish = resultLanguage === "en";
+  setStatus(`Recording/translating continuously in 60s chunks (${resultLanguage})... Keep the video playing and this tab active.`);
 
   try {
-    const isEnglish = resultLanguage === "en";
     const response = await sendRuntimeMessage({
-      type: "START_SELECTED_VIDEO_TRANSLATION_LIVE",
+      type: "START_CONTINUOUS_60S_TRANSLATION",
       payload: {
-        durationMs: 4000,
+        durationMs: 60000,
         mode: isEnglish ? "translate_to_english" : "transcribe",
-        targetLanguage: isEnglish ? "" : resultLanguage
+        targetLanguage: isEnglish ? "" : resultLanguage,
+        autoSeekAfterComplete: true
       }
     });
 
     if (!response?.ok) {
-      throw new Error(response?.error || "Failed to start live translation.");
+      throw new Error(response?.error || "Failed to start continuous translation.");
     }
 
-    const data = response.data || {};
-    if (data.alreadyRunning) {
-      setStatus("Live translation is already running for this tab.");
+    if (response.data?.alreadyRunning) {
+      setStatus("Continuous translation is already running for this tab.");
     } else {
-      setStatus(`Live translation started for video ${Number(data.videoIndex) + 1}. Subtitles will appear on the page.`);
+      setStatus("Continuous translation started. Popup will show completed chunk count.");
     }
-
-    await refreshLiveTranslationStatus();
-    ensureLiveStatusPolling();
+    setContinuousControls({ running: true });
+    ensureContinuousStatusPolling();
+    await refreshContinuousTranslationStatus();
   } catch (error) {
     setStatus(`Error: ${error.message || String(error)}`);
-    setLiveControlState({ running: false });
+    setContinuousControls({ running: false });
   } finally {
     scanButton.disabled = false;
   }
@@ -213,24 +183,93 @@ async function onTranslateClick() {
 
 async function onStopTranslateClick() {
   stopTranslateButton.disabled = true;
-  setStatus("Stopping live translation...");
+  setStatus("Stopping translation... The current 60s chunk may need to finish first.");
 
   try {
-    const response = await sendRuntimeMessage({ type: "STOP_SELECTED_VIDEO_TRANSLATION_LIVE" });
+    const response = await sendRuntimeMessage({ type: "STOP_CONTINUOUS_60S_TRANSLATION" });
     if (!response?.ok) {
-      throw new Error(response?.error || "Failed to stop live translation.");
+      throw new Error(response?.error || "Failed to stop translation.");
     }
-
-    setStatus("Stop requested. The current chunk may finish before updates stop.");
-    await refreshLiveTranslationStatus();
+    await refreshContinuousTranslationStatus();
   } catch (error) {
     setStatus(`Error: ${error.message || String(error)}`);
+  }
+}
+
+async function refreshContinuousTranslationStatus() {
+  const response = await sendRuntimeMessage({ type: "GET_CONTINUOUS_60S_TRANSLATION_STATUS" });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to get translation status.");
+  }
+
+  const data = response.data || {};
+  const running = !!data.running && !data.stopRequested;
+  setContinuousControls({ running });
+
+  if (running) {
+    setStatus(
+      `Translating... completed chunks: ${Number(data.completedSegments || 0)}, captured chunks: ${Number(data.capturedSegments || 0)}, subtitles: ${Number(data.lastOverlayCueCount || 0)} cues`
+    );
+    return data;
+  }
+
+  if (data.stopRequested && !data.finished) {
+    setStatus(
+      `Stopping... completed chunks: ${Number(data.completedSegments || 0)}, captured chunks: ${Number(data.capturedSegments || 0)}`
+    );
+    return data;
+  }
+
+  if (data.finished) {
+    if (data.lastError) {
+      setStatus(`Stopped with error after ${Number(data.completedSegments || 0)} chunks: ${data.lastError}`);
+    } else if (data.finishedReason === "video_end") {
+      setStatus(`Completed at video end. Total chunks: ${Number(data.completedSegments || 0)}.`);
+    } else if (data.finishedReason === "manual_stop") {
+      setStatus(`Stopped. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
+    } else {
+      setStatus(`Translation finished. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
+    }
+    setContinuousControls({ running: false });
+    return data;
+  }
+
+  setContinuousControls({ running: false });
+  return data;
+}
+
+function ensureContinuousStatusPolling() {
+  if (continuousStatusPollTimer) {
+    return;
+  }
+
+  continuousStatusPollTimer = globalThis.setInterval(() => {
+    refreshContinuousTranslationStatus().catch(() => {});
+  }, 3000);
+}
+
+async function onHideSubtitlesClick() {
+  hideSubtitlesButton.disabled = true;
+  setStatus("Hiding subtitles...");
+
+  try {
+    const response = await sendRuntimeMessage({ type: "CLEAR_SELECTED_VIDEO_SUBTITLES" });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Failed to hide subtitles.");
+    }
+
+    setStatus(`Subtitles hidden for video ${Number(response.data?.videoIndex) + 1}.`);
+  } catch (error) {
+    setStatus(`Error: ${error.message || String(error)}`);
+  } finally {
+    hideSubtitlesButton.disabled = false;
   }
 }
 
 scanButton.addEventListener("click", onScanClick);
 translateButton.addEventListener("click", onTranslateClick);
 stopTranslateButton.addEventListener("click", onStopTranslateClick);
+hideSubtitlesButton.addEventListener("click", onHideSubtitlesClick);
 
 resultsEl.addEventListener("click", async (event) => {
   const button = event.target.closest('button[data-action="select-video"]');
@@ -253,6 +292,6 @@ resultsEl.addEventListener("click", async (event) => {
   }
 });
 
-setLiveControlState({ running: false });
-ensureLiveStatusPolling();
-refreshLiveTranslationStatus().catch(() => {});
+setContinuousControls({ running: false });
+ensureContinuousStatusPolling();
+refreshContinuousTranslationStatus().catch(() => {});

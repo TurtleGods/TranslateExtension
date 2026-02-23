@@ -2,6 +2,7 @@ const extApi = globalThis.browser ?? globalThis.chrome;
 const SELECTED_VIDEO_STORAGE_KEY = "selectedVideoByTabId";
 const SETTINGS_STORAGE_KEY = "appSettings";
 const LIVE_TRANSLATION_BY_TAB = new Map();
+const CONTINUOUS_60S_TRANSLATION_BY_TAB = new Map();
 const DEFAULT_APP_SETTINGS = {
   backendBaseUrl: "http://localhost:8787"
 };
@@ -339,6 +340,26 @@ async function releaseVideoAudioCaptureOnTab({ tabId, videoIndex }) {
   return response;
 }
 
+async function seekVideoPlaybackOnTab({ tabId, videoIndex, currentTime, play }) {
+  if (!tabId || !Number.isInteger(videoIndex) || videoIndex < 0) {
+    throw new Error("Missing tabId/videoIndex for seek.");
+  }
+
+  await executeContentScript(tabId);
+  const response = await sendTabMessage(tabId, {
+    type: "SEEK_VIDEO_PLAYBACK",
+    videoIndex,
+    currentTime,
+    play
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to seek video playback.");
+  }
+
+  return response;
+}
+
 function getLiveTranslationState(tabId) {
   return LIVE_TRANSLATION_BY_TAB.get(String(tabId)) || null;
 }
@@ -349,6 +370,237 @@ function setLiveTranslationState(tabId, state) {
 
 function deleteLiveTranslationState(tabId) {
   LIVE_TRANSLATION_BY_TAB.delete(String(tabId));
+}
+
+function getContinuous60sTranslationState(tabId) {
+  return CONTINUOUS_60S_TRANSLATION_BY_TAB.get(String(tabId)) || null;
+}
+
+function setContinuous60sTranslationState(tabId, state) {
+  CONTINUOUS_60S_TRANSLATION_BY_TAB.set(String(tabId), state);
+}
+
+function deleteContinuous60sTranslationState(tabId) {
+  CONTINUOUS_60S_TRANSLATION_BY_TAB.delete(String(tabId));
+}
+
+async function startContinuous60sTranslationOnActiveTab(payload = {}) {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+  if (!isSupportedTab(tab)) {
+    throw new Error("Open a regular http/https page to start translation.");
+  }
+
+  const tabId = tab.id;
+  const selectedVideoIndex = await getSelectedVideoIndexForTab(tabId);
+  if (!Number.isInteger(selectedVideoIndex) || selectedVideoIndex < 0) {
+    throw new Error("No selected video for this tab. Scan and select a video first.");
+  }
+
+  const existing = getContinuous60sTranslationState(tabId);
+  if (existing?.running && !existing.stopRequested) {
+    return {
+      started: false,
+      alreadyRunning: true,
+      tabId,
+      videoIndex: selectedVideoIndex
+    };
+  }
+
+  const state = {
+    running: true,
+    stopRequested: false,
+    finished: false,
+    finishedReason: "",
+    tabId,
+    videoIndex: selectedVideoIndex,
+    segmentDurationMs: Math.max(1000, Number(payload.durationMs) || 60000),
+    mode: payload.mode || "translate_to_english",
+    sourceLanguage: payload.sourceLanguage || "",
+    targetLanguage: payload.targetLanguage || "",
+    autoSeekAfterComplete: payload.autoSeekAfterComplete !== false,
+    startedAt: new Date().toISOString(),
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: "",
+    capturedSegments: 0,
+    completedSegments: 0,
+    lastOverlayCueCount: 0,
+    firstCaptureStartTime: null,
+    videoDuration: null,
+    rewound: false
+  };
+  setContinuous60sTranslationState(tabId, state);
+
+  (async () => {
+    let firstCapture = null;
+    const pendingChunkTasks = new Set();
+
+    const scheduleChunkProcessing = (capture, segmentIndex) => {
+      const task = (async () => {
+        const backend = await requestTimedTextFromBackend({
+          audioBase64: capture.audioBase64,
+          mimeType: capture.mimeType,
+          mode: state.mode,
+          sourceLanguage: state.sourceLanguage,
+          targetLanguage: state.targetLanguage
+        });
+
+        const overlay = await renderSubtitleOverlayOnActiveTab({
+          tabId: capture.tab?.id,
+          videoIndex: capture.selectedVideoIndex,
+          result: backend?.result,
+          offsetSeconds: capture.videoCurrentTimeStart || 0,
+          replace: false
+        });
+
+        state.completedSegments = Math.max(state.completedSegments, segmentIndex + 1);
+        state.lastOverlayCueCount = overlay?.totalCueCount || overlay?.cueCount || 0;
+        state.lastUpdatedAt = new Date().toISOString();
+        state.lastError = "";
+      })()
+        .catch((error) => {
+          state.lastError = error?.message || String(error);
+          state.lastUpdatedAt = new Date().toISOString();
+          state.stopRequested = true;
+          state.finishedReason = state.finishedReason || "error";
+          console.error("[translate-extension] continuous 60s chunk failed:", error);
+        })
+        .finally(() => {
+          pendingChunkTasks.delete(task);
+        });
+
+      pendingChunkTasks.add(task);
+    };
+
+    try {
+      while (!state.stopRequested) {
+        const capture = await captureSelectedVideoAudioSampleOnActiveTab({
+          durationMs: state.segmentDurationMs
+        });
+
+        if (!firstCapture) {
+          firstCapture = capture;
+          state.firstCaptureStartTime = Number(capture.videoCurrentTimeStart || 0);
+          state.videoDuration = Number.isFinite(capture.videoDuration) ? capture.videoDuration : null;
+          await clearSubtitleOverlayOnTab({
+            tabId: capture.tab?.id,
+            videoIndex: capture.selectedVideoIndex
+          }).catch(() => {});
+        }
+
+        const segmentIndex = state.capturedSegments;
+        state.capturedSegments += 1;
+        state.lastUpdatedAt = new Date().toISOString();
+
+        scheduleChunkProcessing(capture, segmentIndex);
+
+        if (capture.videoEnded) {
+          state.finishedReason = "video_end";
+          break;
+        }
+
+        const noProgress = Number.isFinite(capture.videoCurrentTimeStart)
+          && Number.isFinite(capture.videoCurrentTimeEnd)
+          && (capture.videoCurrentTimeEnd - capture.videoCurrentTimeStart) < 0.25;
+        if (noProgress) {
+          throw new Error("Video playback did not advance during capture. Keep the video playing and this tab active.");
+        }
+      }
+    } catch (error) {
+      state.lastError = error?.message || String(error);
+      state.lastUpdatedAt = new Date().toISOString();
+      state.finishedReason = state.finishedReason || "error";
+      console.error("[translate-extension] continuous 60s translation stopped:", error);
+    } finally {
+      if (state.stopRequested && !state.finishedReason) {
+        state.finishedReason = "manual_stop";
+      }
+      if (pendingChunkTasks.size > 0) {
+        await Promise.allSettled(Array.from(pendingChunkTasks));
+      }
+      if (state.autoSeekAfterComplete && firstCapture && state.finishedReason === "video_end") {
+        const playback = await seekVideoPlaybackOnTab({
+          tabId: firstCapture.tab?.id,
+          videoIndex: firstCapture.selectedVideoIndex,
+          currentTime: firstCapture.videoCurrentTimeStart || 0,
+          play: true
+        }).catch(() => null);
+        state.rewound = Boolean(playback?.ok);
+      }
+      state.running = false;
+      state.finished = true;
+      state.stopRequested = true;
+      state.lastUpdatedAt = new Date().toISOString();
+    }
+  })();
+
+  return {
+    started: true,
+    tabId,
+    videoIndex: selectedVideoIndex,
+    segmentDurationMs: state.segmentDurationMs
+  };
+}
+
+async function stopContinuous60sTranslationOnActiveTab() {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+
+  const state = getContinuous60sTranslationState(tab.id);
+  if (!state) {
+    return { tabId: tab.id, stopped: false, running: false };
+  }
+
+  state.stopRequested = true;
+  state.finishedReason = state.finishedReason || "manual_stop";
+  state.lastUpdatedAt = new Date().toISOString();
+
+  return {
+    tabId: tab.id,
+    stopped: true,
+    running: !!state.running
+  };
+}
+
+async function getContinuous60sTranslationStatusForActiveTab() {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    return { tabId: null, running: false };
+  }
+
+  const state = getContinuous60sTranslationState(tab.id);
+  if (!state) {
+    return { tabId: tab.id, running: false };
+  }
+
+  const snapshot = {
+    tabId: tab.id,
+    running: !!state.running,
+    stopRequested: !!state.stopRequested,
+    finished: !!state.finished,
+    finishedReason: state.finishedReason || "",
+    lastError: state.lastError || "",
+    segmentDurationMs: state.segmentDurationMs,
+    capturedSegments: Number(state.capturedSegments || 0),
+    completedSegments: Number(state.completedSegments || 0),
+    lastOverlayCueCount: Number(state.lastOverlayCueCount || 0),
+    firstCaptureStartTime: state.firstCaptureStartTime,
+    videoDuration: state.videoDuration,
+    rewound: !!state.rewound,
+    startedAt: state.startedAt,
+    lastUpdatedAt: state.lastUpdatedAt
+  };
+
+  if (state.finished && !state.running) {
+    // Keep the final state available for one status read after completion, then clean up.
+    deleteContinuous60sTranslationState(tab.id);
+  }
+
+  return snapshot;
 }
 
 async function startLiveTranslationOnActiveTab(payload = {}) {
@@ -542,6 +794,32 @@ async function getLiveTranslationStatusForActiveTab() {
   };
 }
 
+async function clearSelectedVideoSubtitlesOnActiveTab() {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+
+  if (!isSupportedTab(tab)) {
+    throw new Error("Open a regular http/https page to clear subtitles.");
+  }
+
+  const videoIndex = await getSelectedVideoIndexForTab(tab.id);
+  if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+    throw new Error("No selected video for this tab. Scan and select a video first.");
+  }
+
+  const overlay = await clearSubtitleOverlayOnTab({ tabId: tab.id, videoIndex });
+  const captureRelease = await releaseVideoAudioCaptureOnTab({ tabId: tab.id, videoIndex }).catch(() => null);
+
+  return {
+    tabId: tab.id,
+    videoIndex,
+    overlay,
+    captureRelease
+  };
+}
+
 extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "SCAN_ACTIVE_TAB_VIDEOS") {
     scanActiveTabVideos()
@@ -584,43 +862,142 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "START_SELECTED_VIDEO_TRANSLATION_PROTOTYPE") {
-    captureSelectedVideoAudioSampleOnActiveTab({
-      durationMs: message.payload?.durationMs
-    })
-      .then(async (capture) => {
-        const backend = await requestTimedTextFromBackend({
-          audioBase64: capture.audioBase64,
+    (async () => {
+      const segmentDurationMs = Math.max(1000, Number(message.payload?.durationMs) || 60000);
+      const requestedSegmentCountRaw = Number(message.payload?.segmentCount);
+      const fixedSegmentCount = Number.isFinite(requestedSegmentCountRaw) && requestedSegmentCountRaw > 0
+        ? Math.max(1, Math.min(20, Math.floor(requestedSegmentCountRaw)))
+        : null;
+      const mode = message.payload?.mode || "translate_to_english";
+      const sourceLanguage = message.payload?.sourceLanguage || "";
+      const targetLanguage = message.payload?.targetLanguage || "";
+      const autoSeekAfterComplete = message.payload?.autoSeekAfterComplete !== false;
+
+      let firstCapture = null;
+      let lastCapture = null;
+      const captureSummaries = [];
+      const chunkTasks = [];
+
+      let segmentIndex = 0;
+      while (true) {
+        if (fixedSegmentCount != null && segmentIndex >= fixedSegmentCount) {
+          break;
+        }
+
+        const capture = await captureSelectedVideoAudioSampleOnActiveTab({
+          durationMs: segmentDurationMs
+        });
+
+        if (!firstCapture) {
+          firstCapture = capture;
+          await clearSubtitleOverlayOnTab({
+            tabId: capture.tab?.id,
+            videoIndex: capture.selectedVideoIndex
+          }).catch(() => {});
+        }
+
+        lastCapture = capture;
+        captureSummaries.push({
+          segmentIndex,
+          capturedAt: capture.capturedAt,
+          bytes: capture.bytes,
           mimeType: capture.mimeType,
-          mode: message.payload?.mode || "translate_to_english",
-          sourceLanguage: message.payload?.sourceLanguage || "",
-          targetLanguage: message.payload?.targetLanguage || ""
+          durationMsRequested: capture.durationMsRequested,
+          durationMsActual: capture.durationMsActual,
+          videoCurrentTimeStart: capture.videoCurrentTimeStart
         });
 
-        const overlay = await renderSubtitleOverlayOnActiveTab({
-          tabId: capture.tab?.id,
-          videoIndex: capture.selectedVideoIndex,
-          result: backend?.result,
-          offsetSeconds: capture.videoCurrentTimeStart || 0
-        });
+        const chunkTask = (async () => {
+          const backend = await requestTimedTextFromBackend({
+            audioBase64: capture.audioBase64,
+            mimeType: capture.mimeType,
+            mode,
+            sourceLanguage,
+            targetLanguage
+          });
 
-        sendResponse({
-          ok: true,
-          data: {
-            capture: {
-              capturedAt: capture.capturedAt,
-              bytes: capture.bytes,
-              mimeType: capture.mimeType,
-              durationMsRequested: capture.durationMsRequested,
-              durationMsActual: capture.durationMsActual,
-              videoCurrentTimeStart: capture.videoCurrentTimeStart,
-              selectedVideoIndex: capture.selectedVideoIndex,
-              tab: capture.tab
-            },
+          const overlay = await renderSubtitleOverlayOnActiveTab({
+            tabId: capture.tab?.id,
+            videoIndex: capture.selectedVideoIndex,
+            result: backend?.result,
+            offsetSeconds: capture.videoCurrentTimeStart || 0,
+            replace: false
+          });
+
+          return {
+            segmentIndex,
             backend,
             overlay
-          }
-        });
-      })
+          };
+        })();
+
+        chunkTasks.push(chunkTask);
+        segmentIndex += 1;
+
+        if (capture.videoEnded) {
+          break;
+        }
+
+        const noProgress = Number.isFinite(capture.videoCurrentTimeStart)
+          && Number.isFinite(capture.videoCurrentTimeEnd)
+          && (capture.videoCurrentTimeEnd - capture.videoCurrentTimeStart) < 0.25;
+        if (noProgress) {
+          throw new Error("Video playback did not advance during capture. Keep the video playing and this tab active.");
+        }
+      }
+
+      const settled = await Promise.allSettled(chunkTasks);
+      const rejected = settled.find((item) => item.status === "rejected");
+      if (rejected) {
+        throw rejected.reason instanceof Error ? rejected.reason : new Error(String(rejected.reason));
+      }
+
+      const chunkResults = settled.map((item) => item.value).sort((a, b) => a.segmentIndex - b.segmentIndex);
+      const lastChunkResult = chunkResults[chunkResults.length - 1] || null;
+
+      const playback =
+        autoSeekAfterComplete && firstCapture
+          ? await seekVideoPlaybackOnTab({
+              tabId: firstCapture.tab?.id,
+              videoIndex: firstCapture.selectedVideoIndex,
+              currentTime: firstCapture.videoCurrentTimeStart || 0,
+              play: true
+            }).catch(() => null)
+          : null;
+
+      sendResponse({
+        ok: true,
+        data: {
+          batch: {
+            segmentCount: captureSummaries.length,
+            fixedSegmentCount,
+            segmentDurationMs,
+            totalDurationMsRequested: captureSummaries.length * segmentDurationMs,
+            stoppedBecause: fixedSegmentCount != null && captureSummaries.length >= fixedSegmentCount ? "segment_limit" : "video_end_or_error"
+          },
+          capture: firstCapture
+            ? {
+                capturedAt: firstCapture.capturedAt,
+                bytes: firstCapture.bytes,
+                mimeType: firstCapture.mimeType,
+                  durationMsRequested: firstCapture.durationMsRequested,
+                  durationMsActual: firstCapture.durationMsActual,
+                  videoCurrentTimeStart: firstCapture.videoCurrentTimeStart,
+                  videoCurrentTimeEnd: firstCapture.videoCurrentTimeEnd,
+                  videoDuration: firstCapture.videoDuration,
+                  videoEnded: firstCapture.videoEnded,
+                  selectedVideoIndex: firstCapture.selectedVideoIndex,
+                  tab: firstCapture.tab
+                }
+            : null,
+          captures: captureSummaries,
+          backend: lastChunkResult?.backend || null,
+          overlay: lastChunkResult?.overlay || null,
+          chunkResults,
+          playback
+        }
+      });
+    })()
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
 
     return true;
@@ -642,6 +1019,34 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "GET_SELECTED_VIDEO_TRANSLATION_LIVE_STATUS") {
     getLiveTranslationStatusForActiveTab()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "START_CONTINUOUS_60S_TRANSLATION") {
+    startContinuous60sTranslationOnActiveTab(message.payload || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "STOP_CONTINUOUS_60S_TRANSLATION") {
+    stopContinuous60sTranslationOnActiveTab()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "GET_CONTINUOUS_60S_TRANSLATION_STATUS") {
+    getContinuous60sTranslationStatusForActiveTab()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "CLEAR_SELECTED_VIDEO_SUBTITLES") {
+    clearSelectedVideoSubtitlesOnActiveTab()
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
