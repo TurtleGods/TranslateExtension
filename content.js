@@ -246,6 +246,61 @@
     return state;
   }
 
+  function ensureCaptureSourceState(video) {
+    if (!globalThis.__translateVideoCaptureSourceState) {
+      globalThis.__translateVideoCaptureSourceState = new WeakMap();
+    }
+
+    const existing = globalThis.__translateVideoCaptureSourceState.get(video);
+    const existingTrack = existing?.capturedAudioTracks?.find((track) => track?.readyState === "live");
+    if (existing && existingTrack) {
+      return existing;
+    }
+
+    const captureStreamFn = video.captureStream || video.mozCaptureStream;
+    if (typeof captureStreamFn !== "function") {
+      throw new Error("This browser/page does not support video.captureStream() for the selected video.");
+    }
+
+    const capturedStream = captureStreamFn.call(video);
+    const capturedAudioTracks = capturedStream.getAudioTracks();
+    if (!capturedAudioTracks.length) {
+      throw new Error("No audio track detected on the selected video. Play the video first and try again.");
+    }
+
+    const state = {
+      capturedStream,
+      capturedAudioTracks
+    };
+    globalThis.__translateVideoCaptureSourceState.set(video, state);
+    return state;
+  }
+
+  async function releaseCaptureSourceState(video, { tryResumePlayback = true } = {}) {
+    const state = globalThis.__translateVideoCaptureSourceState?.get?.(video);
+    if (!state) {
+      return { released: false };
+    }
+
+    try {
+      for (const track of state.capturedStream?.getTracks?.() || []) {
+        try {
+          track.stop();
+        } catch {}
+      }
+    } finally {
+      globalThis.__translateVideoCaptureSourceState.delete(video);
+    }
+
+    if (tryResumePlayback && !video.paused) {
+      try {
+        await video.play();
+      } catch {}
+    }
+
+    return { released: true };
+  }
+
   function syncOverlayLayout(video, state) {
     if (!video.isConnected || state.disposed) {
       state.container.style.display = "none";
@@ -412,20 +467,12 @@
       throw new Error("Selected video was not found on the page.");
     }
 
-    const captureStreamFn = video.captureStream || video.mozCaptureStream;
-    if (typeof captureStreamFn !== "function") {
-      throw new Error("This browser/page does not support video.captureStream() for the selected video.");
-    }
-
     if (typeof globalThis.MediaRecorder !== "function") {
       throw new Error("MediaRecorder is not available in this browser.");
     }
 
-    const capturedStream = captureStreamFn.call(video);
-    const capturedAudioTracks = capturedStream.getAudioTracks();
-    if (!capturedAudioTracks.length) {
-      throw new Error("No audio track detected on the selected video. Play the video first and try again.");
-    }
+    const captureSource = ensureCaptureSourceState(video);
+    const capturedAudioTracks = captureSource.capturedAudioTracks;
 
     // Record from cloned tracks so stopping the recorder does not stop the video's own audio output.
     const clonedAudioTracks = capturedAudioTracks.map((track) => track.clone());
@@ -440,7 +487,7 @@
       for (const track of audioStream.getTracks()) {
         track.stop();
       }
-      // Do not stop capturedStream tracks here; in Firefox this can interrupt page audio playback.
+      // Keep the shared capture source alive during live mode and release it explicitly on stop.
     };
 
     const recordedBlob = await new Promise((resolve, reject) => {
@@ -497,6 +544,25 @@
     };
   }
 
+  async function releaseVideoAudioCapture({ videoIndex }) {
+    if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+      throw new Error("Invalid video index for capture release.");
+    }
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos[videoIndex];
+    if (!video) {
+      throw new Error("Selected video was not found for capture release.");
+    }
+
+    const result = await releaseCaptureSourceState(video, { tryResumePlayback: true });
+    return {
+      ok: true,
+      videoIndex,
+      ...result
+    };
+  }
+
   const runtimeApi = globalThis.browser ?? globalThis.chrome;
   runtimeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "SCAN_VIDEOS") {
@@ -539,6 +605,13 @@
         sendResponse({ ok: false, error: error.message || String(error) });
       }
       return false;
+    }
+
+    if (message?.type === "RELEASE_VIDEO_AUDIO_CAPTURE") {
+      releaseVideoAudioCapture({ videoIndex: message.videoIndex })
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+      return true;
     }
 
     return false;

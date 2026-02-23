@@ -321,6 +321,24 @@ async function clearSubtitleOverlayOnTab({ tabId, videoIndex }) {
   return response;
 }
 
+async function releaseVideoAudioCaptureOnTab({ tabId, videoIndex }) {
+  if (!tabId || !Number.isInteger(videoIndex) || videoIndex < 0) {
+    throw new Error("Missing tabId/videoIndex for audio capture release.");
+  }
+
+  await executeContentScript(tabId);
+  const response = await sendTabMessage(tabId, {
+    type: "RELEASE_VIDEO_AUDIO_CAPTURE",
+    videoIndex
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to release video audio capture.");
+  }
+
+  return response;
+}
+
 function getLiveTranslationState(tabId) {
   return LIVE_TRANSLATION_BY_TAB.get(String(tabId)) || null;
 }
@@ -444,6 +462,7 @@ async function startLiveTranslationOnActiveTab(payload = {}) {
       if (pendingChunkTasks.size > 0) {
         await Promise.allSettled(Array.from(pendingChunkTasks));
       }
+      await releaseVideoAudioCaptureOnTab({ tabId, videoIndex: state.videoIndex }).catch(() => {});
       state.running = false;
       state.stopRequested = true;
     }
@@ -474,6 +493,7 @@ async function stopLiveTranslationOnActiveTab() {
 
   state.stopRequested = true;
   state.lastUpdatedAt = new Date().toISOString();
+  releaseVideoAudioCaptureOnTab({ tabId: tab.id, videoIndex: state.videoIndex }).catch(() => {});
 
   return {
     stopped: true,
