@@ -218,6 +218,43 @@ async function captureSelectedVideoAudioSampleOnActiveTab(options = {}) {
   };
 }
 
+async function getSelectedVideoSourceInfoOnActiveTab() {
+  const tab = await queryActiveTab();
+
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+
+  if (!isSupportedTab(tab)) {
+    throw new Error("Open a regular http/https page to inspect video source.");
+  }
+
+  const selectedVideoIndex = await getSelectedVideoIndexForTab(tab.id);
+  if (!Number.isInteger(selectedVideoIndex) || selectedVideoIndex < 0) {
+    throw new Error("No selected video for this tab. Scan and select a video first.");
+  }
+
+  await executeContentScript(tab.id);
+  const response = await sendTabMessage(tab.id, {
+    type: "GET_VIDEO_SOURCE_INFO",
+    videoIndex: selectedVideoIndex
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to inspect selected video source.");
+  }
+
+  return {
+    tab: {
+      id: tab.id,
+      title: tab.title || "",
+      url: tab.url || ""
+    },
+    selectedVideoIndex,
+    ...response
+  };
+}
+
 function base64ToUint8Array(base64) {
   const binaryString = globalThis.atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -264,6 +301,43 @@ async function requestTimedTextFromBackend(payload) {
 
   if (!response.ok) {
     const message = data?.error || `Backend request failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  return {
+    backendBaseUrl,
+    ...data
+  };
+}
+
+async function requestTimedTextFromBackendBySourceUrl(payload) {
+  const settings = await getAppSettings();
+  const backendBaseUrl = String(settings.backendBaseUrl || DEFAULT_APP_SETTINGS.backendBaseUrl).replace(/\/+$/, "");
+
+  if (!payload?.sourceUrl) {
+    throw new Error("Missing sourceUrl payload.");
+  }
+
+  const response = await fetch(`${backendBaseUrl}/api/openai/source-url/timed-text`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceUrl: payload.sourceUrl,
+      mode: payload.mode || "transcribe",
+      sourceLanguage: payload.sourceLanguage || "",
+      targetLanguage: payload.targetLanguage || ""
+    })
+  });
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const message = data?.error || `Backend source-url request failed (${response.status})`;
     throw new Error(message);
   }
 
@@ -432,6 +506,7 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
     capturedSegments: 0,
     completedSegments: 0,
     lastOverlayCueCount: 0,
+    consecutiveNoProgressCaptures: 0,
     firstCaptureStartTime: null,
     videoDuration: null,
     rewound: false
@@ -439,99 +514,59 @@ async function startContinuous60sTranslationOnActiveTab(payload = {}) {
   setContinuous60sTranslationState(tabId, state);
 
   (async () => {
-    let firstCapture = null;
-    const pendingChunkTasks = new Set();
-
-    const scheduleChunkProcessing = (capture, segmentIndex) => {
-      const task = (async () => {
-        const backend = await requestTimedTextFromBackend({
-          audioBase64: capture.audioBase64,
-          mimeType: capture.mimeType,
-          mode: state.mode,
-          sourceLanguage: state.sourceLanguage,
-          targetLanguage: state.targetLanguage
-        });
-
-        const overlay = await renderSubtitleOverlayOnActiveTab({
-          tabId: capture.tab?.id,
-          videoIndex: capture.selectedVideoIndex,
-          result: backend?.result,
-          offsetSeconds: capture.videoCurrentTimeStart || 0,
-          replace: false,
-          trimLeadingSeconds: 0
-        });
-
-        state.completedSegments = Math.max(state.completedSegments, segmentIndex + 1);
-        state.lastOverlayCueCount = overlay?.totalCueCount || overlay?.cueCount || 0;
-        state.lastUpdatedAt = new Date().toISOString();
-        state.lastError = "";
-      })()
-        .catch((error) => {
-          state.lastError = error?.message || String(error);
-          state.lastUpdatedAt = new Date().toISOString();
-          state.stopRequested = true;
-          state.finishedReason = state.finishedReason || "error";
-          console.error("[translate-extension] continuous 60s chunk failed:", error);
-        })
-        .finally(() => {
-          pendingChunkTasks.delete(task);
-        });
-
-      pendingChunkTasks.add(task);
-    };
+    let sourceJob = null;
 
     try {
-      while (!state.stopRequested) {
-        const capture = await captureSelectedVideoAudioSampleOnActiveTab({
-          durationMs: state.segmentDurationMs
-        });
+      sourceJob = await getSelectedVideoSourceInfoOnActiveTab();
+      state.firstCaptureStartTime = Number(sourceJob.currentTime || 0);
+      state.videoDuration = Number.isFinite(sourceJob.duration) ? Number(sourceJob.duration) : null;
+      state.lastUpdatedAt = new Date().toISOString();
 
-        if (!firstCapture) {
-          firstCapture = capture;
-          state.firstCaptureStartTime = Number(capture.videoCurrentTimeStart || 0);
-          state.videoDuration = Number.isFinite(capture.videoDuration) ? capture.videoDuration : null;
-          await clearSubtitleOverlayOnTab({
-            tabId: capture.tab?.id,
-            videoIndex: capture.selectedVideoIndex
-          }).catch(() => {});
-        }
-
-        const segmentIndex = state.capturedSegments;
-        state.capturedSegments += 1;
-        state.lastUpdatedAt = new Date().toISOString();
-
-        scheduleChunkProcessing(capture, segmentIndex);
-
-        if (capture.videoEnded) {
-          state.finishedReason = "video_end";
-          break;
-        }
-
-        const noProgress = Number.isFinite(capture.videoCurrentTimeStart)
-          && Number.isFinite(capture.videoCurrentTimeEnd)
-          && (capture.videoCurrentTimeEnd - capture.videoCurrentTimeStart) < 0.25;
-        if (noProgress) {
-          throw new Error("Video playback did not advance during capture. Keep the video playing and this tab active.");
-        }
-
+      if (!sourceJob.directSourceSupported || !sourceJob.directSourceCandidate?.url) {
+        throw new Error(sourceJob.unsupportedReason || "Selected video source is not supported for direct-source processing.");
       }
+
+      await clearSubtitleOverlayOnTab({
+        tabId: sourceJob.tab?.id,
+        videoIndex: sourceJob.selectedVideoIndex
+      }).catch(() => {});
+
+      const backend = await requestTimedTextFromBackendBySourceUrl({
+        sourceUrl: sourceJob.directSourceCandidate.url,
+        mode: state.mode,
+        sourceLanguage: state.sourceLanguage,
+        targetLanguage: state.targetLanguage
+      });
+
+      const overlay = await renderSubtitleOverlayOnActiveTab({
+        tabId: sourceJob.tab?.id,
+        videoIndex: sourceJob.selectedVideoIndex,
+        result: backend?.result,
+        offsetSeconds: 0,
+        replace: true,
+        trimLeadingSeconds: 0
+      });
+
+      state.capturedSegments = 1;
+      state.completedSegments = 1;
+      state.lastOverlayCueCount = overlay?.totalCueCount || overlay?.cueCount || 0;
+      state.consecutiveNoProgressCaptures = 0;
+      state.finishedReason = "source_complete";
+      state.lastUpdatedAt = new Date().toISOString();
     } catch (error) {
       state.lastError = error?.message || String(error);
       state.lastUpdatedAt = new Date().toISOString();
       state.finishedReason = state.finishedReason || "error";
-      console.error("[translate-extension] continuous 60s translation stopped:", error);
+      console.error("[translate-extension] source-first translation stopped:", error);
     } finally {
       if (state.stopRequested && !state.finishedReason) {
         state.finishedReason = "manual_stop";
       }
-      if (pendingChunkTasks.size > 0) {
-        await Promise.allSettled(Array.from(pendingChunkTasks));
-      }
-      if (state.autoSeekAfterComplete && firstCapture && state.finishedReason === "video_end") {
+      if (state.autoSeekAfterComplete && sourceJob && state.finishedReason === "video_end") {
         const playback = await seekVideoPlaybackOnTab({
-          tabId: firstCapture.tab?.id,
-          videoIndex: firstCapture.selectedVideoIndex,
-          currentTime: firstCapture.videoCurrentTimeStart || 0,
+          tabId: sourceJob.tab?.id,
+          videoIndex: sourceJob.selectedVideoIndex,
+          currentTime: sourceJob.currentTime || 0,
           play: true
         }).catch(() => null);
         state.rewound = Boolean(playback?.ok);
@@ -597,6 +632,7 @@ async function getContinuous60sTranslationStatusForActiveTab() {
     capturedSegments: Number(state.capturedSegments || 0),
     completedSegments: Number(state.completedSegments || 0),
     lastOverlayCueCount: Number(state.lastOverlayCueCount || 0),
+    consecutiveNoProgressCaptures: Number(state.consecutiveNoProgressCaptures || 0),
     firstCaptureStartTime: state.firstCaptureStartTime,
     videoDuration: state.videoDuration,
     rewound: !!state.rewound,

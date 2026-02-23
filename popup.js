@@ -149,7 +149,7 @@ async function onTranslateClick() {
 
   const resultLanguage = getSelectedResultLanguage();
   const isEnglish = resultLanguage === "en";
-  setStatus(`Recording/translating continuously in 60s chunks (${resultLanguage})... Keep the video playing and this tab active.`);
+  setStatus(`Starting source-first translation (${resultLanguage})... Direct media source required (blob/HLS/DASH not supported yet).`);
 
   try {
     const response = await sendRuntimeMessage({
@@ -169,7 +169,7 @@ async function onTranslateClick() {
     if (response.data?.alreadyRunning) {
       setStatus("Continuous translation is already running for this tab.");
     } else {
-      setStatus("Continuous translation started. Popup will show completed chunk count.");
+      setStatus("Source-first translation started. Popup will show progress/status.");
     }
     setContinuousControls({ running: true });
     ensureContinuousStatusPolling();
@@ -184,7 +184,7 @@ async function onTranslateClick() {
 
 async function onStopTranslateClick() {
   stopTranslateButton.disabled = true;
-  setStatus("Stopping translation... The current 60s chunk may need to finish first.");
+  setStatus("Stopping translation...");
 
   try {
     const response = await sendRuntimeMessage({ type: "STOP_CONTINUOUS_60S_TRANSLATION" });
@@ -222,10 +222,12 @@ async function refreshContinuousTranslationStatus() {
   }
 
   if (data.finished) {
-    if (data.lastError) {
-      setStatus(`Stopped with error after ${Number(data.completedSegments || 0)} chunks: ${data.lastError}`);
+    if (data.lastError || data.finishedReason === "error") {
+      setStatus(`Stopped with error after ${Number(data.completedSegments || 0)} chunks: ${data.lastError || "Unknown error."}`);
     } else if (data.finishedReason === "video_end") {
       setStatus(`Completed at video end. Total chunks: ${Number(data.completedSegments || 0)}.`);
+    } else if (data.finishedReason === "source_complete") {
+      setStatus(`Source translation finished. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
     } else if (data.finishedReason === "manual_stop") {
       setStatus(`Stopped. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
     } else {

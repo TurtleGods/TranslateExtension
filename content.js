@@ -19,6 +19,107 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function classifySourceUrl(rawUrl) {
+    const url = String(rawUrl || "").trim();
+    if (!url) {
+      return { url: "", scheme: "none", kind: "none" };
+    }
+
+    const lower = url.toLowerCase();
+    if (lower.startsWith("blob:")) {
+      return { url, scheme: "blob", kind: "mse_blob" };
+    }
+    if (lower.startsWith("data:")) {
+      return { url, scheme: "data", kind: "data_url" };
+    }
+    if (lower.startsWith("http://") || lower.startsWith("https://")) {
+      let pathname = "";
+      try {
+        pathname = new URL(url, globalThis.location.href).pathname.toLowerCase();
+      } catch {
+        pathname = lower;
+      }
+
+      if (pathname.endsWith(".m3u8")) {
+        return { url, scheme: "http", kind: "hls_manifest" };
+      }
+      if (pathname.endsWith(".mpd")) {
+        return { url, scheme: "http", kind: "dash_manifest" };
+      }
+
+      return { url, scheme: "http", kind: "direct_http_media_candidate" };
+    }
+
+    return { url, scheme: "other", kind: "unsupported_scheme" };
+  }
+
+  function getVideoSourceInfo({ videoIndex }) {
+    if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+      throw new Error("Invalid video index for source info.");
+    }
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos[videoIndex];
+    if (!video) {
+      throw new Error("Selected video was not found for source info.");
+    }
+
+    const candidateMap = new Map();
+    const pushCandidate = (url, origin, type = "") => {
+      const normalizedUrl = String(url || "").trim();
+      if (!normalizedUrl) {
+        return;
+      }
+      const key = `${origin}|${normalizedUrl}`;
+      if (candidateMap.has(key)) {
+        return;
+      }
+      candidateMap.set(key, {
+        origin,
+        type: String(type || "").trim() || null,
+        ...classifySourceUrl(normalizedUrl)
+      });
+    };
+
+    pushCandidate(video.currentSrc, "currentSrc");
+    pushCandidate(video.src, "src");
+    for (const sourceEl of Array.from(video.querySelectorAll("source"))) {
+      pushCandidate(sourceEl.src || sourceEl.getAttribute("src"), "source", sourceEl.type || sourceEl.getAttribute("type"));
+    }
+
+    const candidates = Array.from(candidateMap.values());
+    const preferred = candidates.find((item) => item.origin === "currentSrc")
+      || candidates[0]
+      || null;
+    const directCandidate = candidates.find((item) => item.kind === "direct_http_media_candidate") || null;
+
+    let unsupportedReason = "";
+    if (!directCandidate) {
+      if (!preferred?.url) {
+        unsupportedReason = "No video source URL found on the selected video element.";
+      } else if (preferred.kind === "mse_blob") {
+        unsupportedReason = "Selected video uses a blob/MSE source. Direct-source audio extraction is not implemented for blob URLs yet.";
+      } else if (preferred.kind === "hls_manifest" || preferred.kind === "dash_manifest") {
+        unsupportedReason = "Selected video uses HLS/DASH manifest streaming. Manifest/segment source processing is not implemented yet.";
+      } else {
+        unsupportedReason = `Unsupported source type for direct processing: ${preferred.kind}.`;
+      }
+    }
+
+    return {
+      ok: true,
+      videoIndex,
+      currentTime: Number(video.currentTime || 0),
+      duration: Number.isFinite(video.duration) ? Number(video.duration) : null,
+      paused: !!video.paused,
+      preferredSource: preferred,
+      directSourceCandidate: directCandidate,
+      candidates,
+      directSourceSupported: Boolean(directCandidate),
+      unsupportedReason
+    };
+  }
+
   function scanVideos() {
     const videos = Array.from(document.querySelectorAll("video"));
 
@@ -712,6 +813,15 @@
         .then((result) => sendResponse(result))
         .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
       return true;
+    }
+
+    if (message?.type === "GET_VIDEO_SOURCE_INFO") {
+      try {
+        sendResponse(getVideoSourceInfo({ videoIndex: message.videoIndex }));
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message || String(error) });
+      }
+      return false;
     }
 
     return false;
