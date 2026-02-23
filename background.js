@@ -1,6 +1,7 @@
 const extApi = globalThis.browser ?? globalThis.chrome;
 const SELECTED_VIDEO_STORAGE_KEY = "selectedVideoByTabId";
 const SETTINGS_STORAGE_KEY = "appSettings";
+const LIVE_TRANSLATION_BY_TAB = new Map();
 const DEFAULT_APP_SETTINGS = {
   backendBaseUrl: "http://localhost:8787"
 };
@@ -271,6 +272,231 @@ async function requestTimedTextFromBackend(payload) {
   };
 }
 
+async function renderSubtitleOverlayOnActiveTab({
+  tabId,
+  videoIndex,
+  result,
+  offsetSeconds,
+  replace,
+  liveAlignToNow,
+  displayLeadSeconds
+}) {
+  if (!tabId || !Number.isInteger(videoIndex) || videoIndex < 0) {
+    throw new Error("Missing tabId/videoIndex for subtitle overlay render.");
+  }
+
+  await executeContentScript(tabId);
+  const response = await sendTabMessage(tabId, {
+    type: "RENDER_SUBTITLE_OVERLAY",
+    videoIndex,
+    result,
+    offsetSeconds,
+    replace,
+    liveAlignToNow,
+    displayLeadSeconds
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to render subtitle overlay.");
+  }
+
+  return response;
+}
+
+async function clearSubtitleOverlayOnTab({ tabId, videoIndex }) {
+  if (!tabId || !Number.isInteger(videoIndex) || videoIndex < 0) {
+    throw new Error("Missing tabId/videoIndex for subtitle overlay clear.");
+  }
+
+  await executeContentScript(tabId);
+  const response = await sendTabMessage(tabId, {
+    type: "CLEAR_SUBTITLE_OVERLAY",
+    videoIndex
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Failed to clear subtitle overlay.");
+  }
+
+  return response;
+}
+
+function getLiveTranslationState(tabId) {
+  return LIVE_TRANSLATION_BY_TAB.get(String(tabId)) || null;
+}
+
+function setLiveTranslationState(tabId, state) {
+  LIVE_TRANSLATION_BY_TAB.set(String(tabId), state);
+}
+
+function deleteLiveTranslationState(tabId) {
+  LIVE_TRANSLATION_BY_TAB.delete(String(tabId));
+}
+
+async function startLiveTranslationOnActiveTab(payload = {}) {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+  if (!isSupportedTab(tab)) {
+    throw new Error("Open a regular http/https page to start translation.");
+  }
+
+  const tabId = tab.id;
+  const selectedVideoIndex = await getSelectedVideoIndexForTab(tabId);
+  if (!Number.isInteger(selectedVideoIndex) || selectedVideoIndex < 0) {
+    throw new Error("No selected video for this tab. Scan and select a video first.");
+  }
+
+  const existing = getLiveTranslationState(tabId);
+  if (existing?.running && !existing.stopRequested) {
+    return {
+      started: false,
+      alreadyRunning: true,
+      tabId,
+      videoIndex: selectedVideoIndex
+    };
+  }
+
+  const state = {
+    running: true,
+    stopRequested: false,
+    tabId,
+    videoIndex: selectedVideoIndex,
+    chunkIndex: 0,
+    durationMs: Math.max(1500, Number(payload.durationMs) || 4000),
+    mode: payload.mode || "translate_to_english",
+    sourceLanguage: payload.sourceLanguage || "",
+    targetLanguage: payload.targetLanguage || "",
+    startedAt: new Date().toISOString(),
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: "",
+    lastOverlayCueCount: 0
+  };
+  setLiveTranslationState(tabId, state);
+
+  clearSubtitleOverlayOnTab({ tabId, videoIndex: selectedVideoIndex }).catch(() => {});
+
+  (async () => {
+    try {
+      while (!state.stopRequested) {
+        await executeContentScript(tabId);
+        const capture = await sendTabMessage(tabId, {
+          type: "CAPTURE_VIDEO_AUDIO_SAMPLE",
+          videoIndex: state.videoIndex,
+          durationMs: state.durationMs
+        });
+
+        if (!capture?.ok) {
+          throw new Error(capture?.error || "Failed to capture video audio sample.");
+        }
+
+        const backend = await requestTimedTextFromBackend({
+          audioBase64: capture.audioBase64,
+          mimeType: capture.mimeType,
+          mode: state.mode,
+          sourceLanguage: state.sourceLanguage,
+          targetLanguage: state.targetLanguage
+        });
+
+        const overlay = await renderSubtitleOverlayOnActiveTab({
+          tabId,
+          videoIndex: state.videoIndex,
+          result: backend?.result,
+          offsetSeconds: capture.videoCurrentTimeStart || 0,
+          replace: state.chunkIndex === 0,
+          liveAlignToNow: true,
+          displayLeadSeconds: 0.6
+        });
+
+        state.chunkIndex += 1;
+        state.lastUpdatedAt = new Date().toISOString();
+        state.lastError = "";
+        state.lastOverlayCueCount = overlay?.totalCueCount || overlay?.cueCount || 0;
+      }
+    } catch (error) {
+      state.lastError = error?.message || String(error);
+      state.lastUpdatedAt = new Date().toISOString();
+      console.error("[translate-extension] live translation stopped with error:", error);
+    } finally {
+      state.running = false;
+      state.stopRequested = true;
+    }
+  })();
+
+  return {
+    started: true,
+    tabId,
+    videoIndex: selectedVideoIndex,
+    durationMs: state.durationMs
+  };
+}
+
+async function stopLiveTranslationOnActiveTab() {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    throw new Error("No active tab found.");
+  }
+
+  const state = getLiveTranslationState(tab.id);
+  if (!state) {
+    return {
+      stopped: false,
+      running: false,
+      tabId: tab.id
+    };
+  }
+
+  state.stopRequested = true;
+  state.lastUpdatedAt = new Date().toISOString();
+
+  return {
+    stopped: true,
+    running: !!state.running,
+    tabId: tab.id
+  };
+}
+
+async function getLiveTranslationStatusForActiveTab() {
+  const tab = await queryActiveTab();
+  if (!tab?.id) {
+    return { tabId: null, running: false };
+  }
+
+  const state = getLiveTranslationState(tab.id);
+  if (!state) {
+    return { tabId: tab.id, running: false };
+  }
+
+  if (!state.running && state.stopRequested) {
+    const snapshot = {
+      tabId: tab.id,
+      running: false,
+      stopRequested: true,
+      chunkIndex: state.chunkIndex,
+      durationMs: state.durationMs,
+      lastUpdatedAt: state.lastUpdatedAt,
+      lastError: state.lastError || "",
+      lastOverlayCueCount: state.lastOverlayCueCount || 0
+    };
+    if (!state.lastError) {
+      deleteLiveTranslationState(tab.id);
+    }
+    return snapshot;
+  }
+
+  return {
+    tabId: tab.id,
+    running: !!state.running,
+    stopRequested: !!state.stopRequested,
+    chunkIndex: state.chunkIndex,
+    durationMs: state.durationMs,
+    lastUpdatedAt: state.lastUpdatedAt,
+    lastError: state.lastError || "",
+    lastOverlayCueCount: state.lastOverlayCueCount || 0
+  };
+}
+
 extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "SCAN_ACTIVE_TAB_VIDEOS") {
     scanActiveTabVideos()
@@ -325,6 +551,13 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
           targetLanguage: message.payload?.targetLanguage || ""
         });
 
+        const overlay = await renderSubtitleOverlayOnActiveTab({
+          tabId: capture.tab?.id,
+          videoIndex: capture.selectedVideoIndex,
+          result: backend?.result,
+          offsetSeconds: capture.videoCurrentTimeStart || 0
+        });
+
         sendResponse({
           ok: true,
           data: {
@@ -334,15 +567,38 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
               mimeType: capture.mimeType,
               durationMsRequested: capture.durationMsRequested,
               durationMsActual: capture.durationMsActual,
+              videoCurrentTimeStart: capture.videoCurrentTimeStart,
               selectedVideoIndex: capture.selectedVideoIndex,
               tab: capture.tab
             },
-            backend
+            backend,
+            overlay
           }
         });
       })
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
 
+    return true;
+  }
+
+  if (message?.type === "START_SELECTED_VIDEO_TRANSLATION_LIVE") {
+    startLiveTranslationOnActiveTab(message.payload || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "STOP_SELECTED_VIDEO_TRANSLATION_LIVE") {
+    stopLiveTranslationOnActiveTab()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "GET_SELECTED_VIDEO_TRANSLATION_LIVE_STATUS") {
+    getLiveTranslationStatusForActiveTab()
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
 

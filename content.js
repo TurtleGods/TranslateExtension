@@ -78,6 +78,314 @@
     });
   }
 
+  function parseVttTimestamp(value) {
+    const text = String(value || "").trim().replace(",", ".");
+    const parts = text.split(":");
+    if (parts.length < 2 || parts.length > 3) {
+      return NaN;
+    }
+
+    const numbers = parts.map((part) => Number(part));
+    if (numbers.some((num) => !Number.isFinite(num))) {
+      return NaN;
+    }
+
+    if (numbers.length === 2) {
+      const [minutes, seconds] = numbers;
+      return minutes * 60 + seconds;
+    }
+
+    const [hours, minutes, seconds] = numbers;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  function parseVttCues(vttText) {
+    const text = String(vttText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const lines = text.split("\n");
+    const cues = [];
+
+    let i = 0;
+    while (i < lines.length) {
+      let line = lines[i].trim();
+
+      if (!line || line === "WEBVTT" || line.startsWith("NOTE")) {
+        i += 1;
+        continue;
+      }
+
+      if (!line.includes("-->") && i + 1 < lines.length && lines[i + 1].includes("-->")) {
+        i += 1;
+        line = lines[i].trim();
+      }
+
+      if (!line.includes("-->")) {
+        i += 1;
+        continue;
+      }
+
+      const [rawStart, rawEndWithSettings] = line.split("-->");
+      const start = parseVttTimestamp(rawStart);
+      const end = parseVttTimestamp(String(rawEndWithSettings || "").trim().split(/\s+/)[0]);
+      i += 1;
+
+      const textLines = [];
+      while (i < lines.length && lines[i].trim() !== "") {
+        textLines.push(lines[i]);
+        i += 1;
+      }
+
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        cues.push({
+          start,
+          end,
+          text: textLines.join("\n").trim()
+        });
+      }
+    }
+
+    return cues;
+  }
+
+  function normalizeCuesFromBackend(result) {
+    if (!result || typeof result !== "object") {
+      return [];
+    }
+
+    if (result.format === "vtt") {
+      return parseVttCues(result.timedText || "");
+    }
+
+    if (result.format === "segments") {
+      const translatedSegments = result?.translation?.enabled ? result.translation.segments : null;
+      const inputSegments = Array.isArray(translatedSegments) ? translatedSegments : result.segments;
+      if (!Array.isArray(inputSegments)) {
+        return [];
+      }
+
+      return inputSegments
+        .map((segment) => ({
+          start: Number(segment?.start ?? 0),
+          end: Number(segment?.end ?? 0),
+          text: String(segment?.translatedText || segment?.text || "").trim()
+        }))
+        .filter((cue) => Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.text);
+    }
+
+    return [];
+  }
+
+  function formatCueWindowText(cues, nowRelativeSeconds) {
+    const active = cues.filter((cue) => nowRelativeSeconds >= cue.start && nowRelativeSeconds <= cue.end);
+    if (active.length === 0) {
+      return "";
+    }
+    return active.map((cue) => cue.text).join("\n");
+  }
+
+  function ensureOverlayState(video) {
+    if (!globalThis.__translateVideoOverlayState) {
+      globalThis.__translateVideoOverlayState = new WeakMap();
+    }
+
+    const existing = globalThis.__translateVideoOverlayState.get(video);
+    if (existing) {
+      return existing;
+    }
+
+    const container = document.createElement("div");
+    container.className = "translate-video-subtitle-overlay";
+    Object.assign(container.style, {
+      position: "fixed",
+      left: "0px",
+      top: "0px",
+      width: "0px",
+      height: "0px",
+      pointerEvents: "none",
+      zIndex: "2147483647",
+      display: "none"
+    });
+
+    const box = document.createElement("div");
+    Object.assign(box.style, {
+      position: "absolute",
+      left: "50%",
+      top: "50%",
+      transform: "translate(-50%, -50%)",
+      maxWidth: "92%",
+      padding: "0.45em 0.8em",
+      borderRadius: "0.35em",
+      background: "rgba(0, 0, 0, 0.72)",
+      color: "#fff",
+      fontWeight: "600",
+      textAlign: "center",
+      lineHeight: "1.35",
+      whiteSpace: "pre-wrap",
+      textShadow: "0 1px 2px rgba(0,0,0,0.75)",
+      fontFamily: "Segoe UI, sans-serif",
+      fontSize: "16px"
+    });
+
+    container.appendChild(box);
+    document.documentElement.appendChild(container);
+
+    const state = {
+      container,
+      box,
+      cues: [],
+      rafId: 0,
+      lastText: "",
+      disposed: false
+    };
+
+    globalThis.__translateVideoOverlayState.set(video, state);
+    return state;
+  }
+
+  function syncOverlayLayout(video, state) {
+    if (!video.isConnected || state.disposed) {
+      state.container.style.display = "none";
+      return false;
+    }
+
+    const rect = video.getBoundingClientRect();
+    if (!isVisible(video) || rect.width <= 0 || rect.height <= 0) {
+      state.container.style.display = "none";
+      return true;
+    }
+
+    state.container.style.display = "block";
+    state.container.style.left = `${Math.round(rect.left)}px`;
+    state.container.style.top = `${Math.round(rect.top)}px`;
+    state.container.style.width = `${Math.round(rect.width)}px`;
+      state.container.style.height = `${Math.round(rect.height)}px`;
+
+      const fontPx = Math.max(14, Math.min(28, Math.round(rect.width * 0.035)));
+      state.box.style.fontSize = `${fontPx}px`;
+      return true;
+  }
+
+  function startSubtitleOverlayLoop(video, state) {
+    if (state.rafId) {
+      globalThis.cancelAnimationFrame(state.rafId);
+      state.rafId = 0;
+    }
+
+    const tick = () => {
+      if (!syncOverlayLayout(video, state)) {
+        return;
+      }
+
+      const nowSeconds = Number(video.currentTime || 0);
+      if (state.cues.length > 300) {
+        state.cues = state.cues.filter((cue) => cue.end >= nowSeconds - 10);
+      }
+
+      const text = formatCueWindowText(state.cues, nowSeconds);
+      if (text !== state.lastText) {
+        state.lastText = text;
+        state.box.textContent = text;
+        state.box.style.display = text ? "block" : "none";
+      }
+
+      state.rafId = globalThis.requestAnimationFrame(tick);
+    };
+
+    state.rafId = globalThis.requestAnimationFrame(tick);
+  }
+
+  function renderSubtitleOverlay({
+    videoIndex,
+    result,
+    offsetSeconds = 0,
+    replace = false,
+    liveAlignToNow = false,
+    displayLeadSeconds = 0.4
+  }) {
+    if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+      throw new Error("Invalid video index for subtitle overlay.");
+    }
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos[videoIndex];
+    if (!video) {
+      throw new Error("Selected video was not found for subtitle overlay.");
+    }
+
+    const relativeCues = normalizeCuesFromBackend(result);
+    if (!relativeCues.length) {
+      throw new Error("No subtitle cues found in backend response.");
+    }
+
+    const cueSpanEnd = relativeCues.reduce((max, cue) => Math.max(max, Number(cue.end) || 0), 0);
+    let effectiveOffsetSeconds = Number(offsetSeconds) || 0;
+
+    if (liveAlignToNow) {
+      // For near-real-time mode, shift the returned chunk close to "now" so backend latency
+      // doesn't make every cue land in the past by the time it arrives.
+      effectiveOffsetSeconds = Number(video.currentTime || 0) - cueSpanEnd + (Number(displayLeadSeconds) || 0);
+    }
+
+    const absoluteCues = relativeCues.map((cue) => ({
+      start: cue.start + effectiveOffsetSeconds,
+      end: cue.end + effectiveOffsetSeconds,
+      text: cue.text
+    }));
+
+    const state = ensureOverlayState(video);
+    const nextCues = replace ? absoluteCues : state.cues.concat(absoluteCues);
+    nextCues.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
+    const deduped = [];
+    for (const cue of nextCues) {
+      const prev = deduped[deduped.length - 1];
+      if (
+        prev &&
+        Math.abs(prev.start - cue.start) < 0.001 &&
+        Math.abs(prev.end - cue.end) < 0.001 &&
+        prev.text === cue.text
+      ) {
+        continue;
+      }
+      deduped.push(cue);
+    }
+
+    state.cues = deduped;
+    state.lastText = "";
+    state.box.textContent = "";
+    state.box.style.display = "none";
+    startSubtitleOverlayLoop(video, state);
+
+    return {
+      ok: true,
+      videoIndex,
+      cueCount: absoluteCues.length,
+      totalCueCount: state.cues.length
+    };
+  }
+
+  function clearSubtitleOverlay({ videoIndex }) {
+    if (!Number.isInteger(videoIndex) || videoIndex < 0) {
+      throw new Error("Invalid video index for clearing subtitle overlay.");
+    }
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos[videoIndex];
+    if (!video) {
+      throw new Error("Selected video was not found for subtitle overlay clear.");
+    }
+
+    const state = globalThis.__translateVideoOverlayState?.get?.(video);
+    if (!state) {
+      return { ok: true, videoIndex, cleared: false };
+    }
+
+    state.cues = [];
+    state.lastText = "";
+    state.box.textContent = "";
+    state.box.style.display = "none";
+    return { ok: true, videoIndex, cleared: true };
+  }
+
   async function captureVideoAudioSample({ videoIndex, durationMs = 6000 }) {
     if (!Number.isInteger(videoIndex) || videoIndex < 0) {
       throw new Error("Invalid video index for audio capture.");
@@ -109,6 +417,7 @@
     const mimeType = pickSupportedAudioMimeType();
     const recorder = mimeType ? new MediaRecorder(audioStream, { mimeType }) : new MediaRecorder(audioStream);
     const startedAt = Date.now();
+    const videoCurrentTimeStart = Number(video.currentTime || 0);
 
     const stopAllTracks = () => {
       for (const track of capturedStream.getTracks()) {
@@ -168,7 +477,8 @@
       durationMsActual: Date.now() - startedAt,
       bytes: recordedBlob.size,
       mimeType: recordedBlob.type || mimeType || "audio/webm",
-      audioBase64
+      audioBase64,
+      videoCurrentTimeStart
     };
   }
 
@@ -187,6 +497,33 @@
         .then((result) => sendResponse(result))
         .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
       return true;
+    }
+
+    if (message?.type === "RENDER_SUBTITLE_OVERLAY") {
+      try {
+        sendResponse(
+          renderSubtitleOverlay({
+            videoIndex: message.videoIndex,
+            result: message.result,
+            offsetSeconds: message.offsetSeconds,
+            replace: !!message.replace,
+            liveAlignToNow: !!message.liveAlignToNow,
+            displayLeadSeconds: message.displayLeadSeconds
+          })
+        );
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message || String(error) });
+      }
+      return false;
+    }
+
+    if (message?.type === "CLEAR_SUBTITLE_OVERLAY") {
+      try {
+        sendResponse(clearSubtitleOverlay({ videoIndex: message.videoIndex }));
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message || String(error) });
+      }
+      return false;
     }
 
     return false;
