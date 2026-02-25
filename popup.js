@@ -1,61 +1,37 @@
-const extApi = globalThis.browser ?? globalThis.chrome;
+const els = {
+  scanBtn: document.getElementById("scanBtn"),
+  refreshBtn: document.getElementById("refreshBtn"),
+  startBtn: document.getElementById("startBtn"),
+  stopBtn: document.getElementById("stopBtn"),
+  targetLanguage: document.getElementById("targetLanguage"),
+  videoList: document.getElementById("videoList"),
+  videoCount: document.getElementById("videoCount"),
+  statusLine: document.getElementById("statusLine"),
+  errorLine: document.getElementById("errorLine"),
+  pageUrl: document.getElementById("pageUrl"),
+  backendLine: document.getElementById("backendLine")
+};
 
-const scanButton = document.getElementById("scanButton");
-const translateButton = document.getElementById("translateButton");
-const stopTranslateButton = document.getElementById("stopTranslateButton");
-const hideSubtitlesButton = document.getElementById("hideSubtitlesButton");
-const resultLanguageSelect = document.getElementById("resultLanguageSelect");
-const statusEl = document.getElementById("status");
-const resultsEl = document.getElementById("results");
-let lastScanData = null;
-let continuousStatusPollTimer = 0;
+let popupState = {
+  tabId: null,
+  pageUrl: "",
+  videos: [],
+  selectedVideoId: null,
+  targetLanguage: "zh",
+  status: "Idle",
+  error: "",
+  backendBaseUrl: "http://localhost:8787"
+};
 
-function setStatus(text) {
-  if (statusEl) {
-    statusEl.textContent = text;
-  }
-}
-
-function clearResults() {
-  resultsEl.innerHTML = "";
-}
-
-function getSelectedResultLanguage() {
-  return String(resultLanguageSelect?.value || "zh-TW");
-}
-
-function addResultItem(html, options = {}) {
-  const li = document.createElement("li");
-  li.innerHTML = html;
-  if (options.className) {
-    li.className = options.className;
-  }
-  if (options.videoIndex !== undefined) {
-    li.dataset.videoIndex = String(options.videoIndex);
-  }
-  resultsEl.appendChild(li);
-  return li;
-}
-
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function sendRuntimeMessage(message) {
-  if (extApi.runtime.sendMessage.length <= 1) {
-    return extApi.runtime.sendMessage(message);
-  }
-
+function sendMessage(message) {
   return new Promise((resolve, reject) => {
-    extApi.runtime.sendMessage(message, (response) => {
-      const err = globalThis.chrome?.runtime?.lastError;
-      if (err) {
-        reject(new Error(err.message));
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response?.ok) {
+        reject(new Error(response?.error || "Unknown error"));
         return;
       }
       resolve(response);
@@ -63,238 +39,168 @@ function sendRuntimeMessage(message) {
   });
 }
 
-function setContinuousControls({ running }) {
-  translateButton.disabled = !!running;
-  stopTranslateButton.disabled = !running;
-  resultLanguageSelect.disabled = !!running;
+function formatDuration(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "unknown";
+  const sec = Math.round(value);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function renderResults(scanData) {
-  clearResults();
-  lastScanData = scanData;
+function shortenUrl(url) {
+  if (!url) return "(no src)";
+  return url.length > 90 ? `${url.slice(0, 87)}...` : url;
+}
 
-  const videos = scanData?.videos || [];
-  if (videos.length === 0) {
-    addResultItem('<span class="empty">No video elements found on this page.</span>');
+function renderVideos() {
+  const { videos, selectedVideoId } = popupState;
+  els.videoCount.textContent = String(videos.length);
+
+  if (!videos.length) {
+    els.videoList.className = "video-list empty";
+    els.videoList.textContent = "No videos found. Click Scan Videos.";
     return;
   }
+
+  els.videoList.className = "video-list";
+  els.videoList.textContent = "";
 
   videos.forEach((video) => {
-    const src = video.src ? `<code>${escapeHtml(video.src)}</code>` : "<em>No src</em>";
-    const isSelected = scanData?.selectedVideoIndex === video.index;
-    addResultItem(
-      [
-        `<strong>Video ${video.index + 1}</strong>`,
-        `Visible: ${video.visible ? "Yes" : "No"} | ${video.width}x${video.height}`,
-        `Paused: ${video.paused ? "Yes" : "No"} | Duration: ${video.duration ?? "unknown"}s`,
-        `Source: ${src}`,
-        isSelected ? '<span class="selected-pill">Selected for translation</span>' : "",
-        `<div class="result-actions"><button type="button" data-action="select-video" data-video-index="${video.index}">Select This Video</button></div>`
-      ].filter(Boolean).join("<br>"),
-      {
-        className: isSelected ? "selected" : "",
-        videoIndex: video.index
-      }
-    );
-  });
-}
+    const item = document.createElement("div");
+    item.className = "video-item";
 
-async function onSelectVideo(videoIndex) {
-  setStatus(`Selecting video ${videoIndex + 1}...`);
+    const label = document.createElement("label");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "selectedVideo";
+    radio.value = video.id;
+    radio.checked = video.id === selectedVideoId;
 
-  const response = await sendRuntimeMessage({
-    type: "SET_ACTIVE_TAB_TARGET_VIDEO",
-    videoIndex
-  });
-
-  if (!response?.ok) {
-    throw new Error(response?.error || "Failed to select video.");
-  }
-
-  if (lastScanData) {
-    lastScanData = { ...lastScanData, selectedVideoIndex: videoIndex };
-    renderResults(lastScanData);
-  }
-
-  setStatus(`Selected video ${videoIndex + 1} for continuous translation (60s chunks).`);
-}
-
-async function onScanClick() {
-  scanButton.disabled = true;
-  setStatus("Scanning active tab...");
-  clearResults();
-
-  try {
-    const response = await sendRuntimeMessage({ type: "SCAN_ACTIVE_TAB_VIDEOS" });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Scan failed.");
-    }
-
-    const { tab, count, scannedAt } = response.data;
-    renderResults(response.data);
-    setStatus(`Found ${count} video(s) in "${tab.title || tab.url}" at ${new Date(scannedAt).toLocaleTimeString()}.`);
-  } catch (error) {
-    setStatus(`Error: ${error.message || String(error)}`);
-    addResultItem('<span class="empty">Scan did not complete.</span>');
-  } finally {
-    scanButton.disabled = false;
-  }
-}
-
-async function onTranslateClick() {
-  console.log("Translate button clicked");
-  translateButton.disabled = true;
-  stopTranslateButton.disabled = true;
-  scanButton.disabled = true;
-
-  const resultLanguage = getSelectedResultLanguage();
-  const isEnglish = resultLanguage === "en";
-  setStatus(`Starting source-first translation (${resultLanguage})... Direct media source required (blob/HLS/DASH not supported yet).`);
-
-  try {
-    const response = await sendRuntimeMessage({
-      type: "START_CONTINUOUS_60S_TRANSLATION",
-      payload: {
-        durationMs: 60000,
-        mode: isEnglish ? "translate_to_english" : "transcribe",
-        targetLanguage: isEnglish ? "" : resultLanguage,
-        autoSeekAfterComplete: true
-      }
+    radio.addEventListener("change", async () => {
+      if (!radio.checked) return;
+      await runAction(async () => {
+        await sendMessage({ type: "SELECT_VIDEO", videoId: video.id });
+        popupState.selectedVideoId = video.id;
+      });
+      render();
     });
 
-    if (!response?.ok) {
-      throw new Error(response?.error || "Failed to start continuous translation.");
-    }
+    const meta = document.createElement("div");
+    meta.className = "video-meta";
 
-    if (response.data?.alreadyRunning) {
-      setStatus("Continuous translation is already running for this tab.");
-    } else {
-      setStatus("Source-first translation started. Popup will show progress/status.");
-    }
-    setContinuousControls({ running: true });
-    ensureContinuousStatusPolling();
-    await refreshContinuousTranslationStatus();
-  } catch (error) {
-    setStatus(`Error: ${error.message || String(error)}`);
-    setContinuousControls({ running: false });
-  } finally {
-    scanButton.disabled = false;
+    const title = document.createElement("div");
+    title.className = "video-title";
+    title.textContent = `Video ${video.index + 1}${video.visible ? "" : " (hidden)"}`;
+
+    const line1 = document.createElement("div");
+    line1.className = "video-sub";
+    line1.textContent = `${video.width}x${video.height} | ${formatDuration(video.duration)} | ${video.paused ? "paused" : "playing"}`;
+
+    const line2 = document.createElement("div");
+    line2.className = "video-sub";
+    line2.textContent = shortenUrl(video.currentSrc || video.src);
+
+    meta.append(title, line1, line2);
+    label.append(radio, meta);
+    item.append(label);
+    els.videoList.append(item);
+  });
+}
+
+function renderStatus() {
+  els.statusLine.textContent = `Status: ${popupState.status || "Idle"}`;
+
+  if (popupState.error) {
+    els.errorLine.hidden = false;
+    els.errorLine.textContent = popupState.error;
+  } else {
+    els.errorLine.hidden = true;
+    els.errorLine.textContent = "";
   }
 }
 
-async function onStopTranslateClick() {
-  stopTranslateButton.disabled = true;
-  setStatus("Stopping translation...");
+function renderMeta() {
+  els.pageUrl.textContent = popupState.pageUrl ? `Page: ${shortenUrl(popupState.pageUrl)}` : "Page: (unknown)";
+  els.targetLanguage.value = popupState.targetLanguage || "zh";
+  els.backendLine.textContent = `Backend: ${popupState.backendBaseUrl}`;
+}
 
+function render() {
+  renderMeta();
+  renderVideos();
+  renderStatus();
+}
+
+async function loadState() {
+  const response = await sendMessage({ type: "GET_POPUP_STATE" });
+  popupState = { ...popupState, ...response.state };
+  render();
+}
+
+async function runAction(fn) {
   try {
-    const response = await sendRuntimeMessage({ type: "STOP_CONTINUOUS_60S_TRANSLATION" });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Failed to stop translation.");
-    }
-    await refreshContinuousTranslationStatus();
+    popupState.error = "";
+    renderStatus();
+    await fn();
   } catch (error) {
-    setStatus(`Error: ${error.message || String(error)}`);
-  }
-}
-
-async function refreshContinuousTranslationStatus() {
-  const response = await sendRuntimeMessage({ type: "GET_CONTINUOUS_60S_TRANSLATION_STATUS" });
-  if (!response?.ok) {
-    throw new Error(response?.error || "Failed to get translation status.");
-  }
-
-  const data = response.data || {};
-  const running = !!data.running && !data.stopRequested;
-  setContinuousControls({ running });
-
-  if (running) {
-    setStatus(
-      `Translating... completed chunks: ${Number(data.completedSegments || 0)}, captured chunks: ${Number(data.capturedSegments || 0)}, subtitles: ${Number(data.lastOverlayCueCount || 0)} cues`
-    );
-    return data;
-  }
-
-  if (data.stopRequested && !data.finished) {
-    setStatus(
-      `Stopping... completed chunks: ${Number(data.completedSegments || 0)}, captured chunks: ${Number(data.capturedSegments || 0)}`
-    );
-    return data;
-  }
-
-  if (data.finished) {
-    if (data.lastError || data.finishedReason === "error") {
-      setStatus(`Stopped with error after ${Number(data.completedSegments || 0)} chunks: ${data.lastError || "Unknown error."}`);
-    } else if (data.finishedReason === "video_end") {
-      setStatus(`Completed at video end. Total chunks: ${Number(data.completedSegments || 0)}.`);
-    } else if (data.finishedReason === "source_complete") {
-      setStatus(`Source translation finished. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
-    } else if (data.finishedReason === "manual_stop") {
-      setStatus(`Stopped. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
-    } else {
-      setStatus(`Translation finished. Total completed chunks: ${Number(data.completedSegments || 0)}.`);
-    }
-    setContinuousControls({ running: false });
-    return data;
-  }
-
-  setContinuousControls({ running: false });
-  return data;
-}
-
-function ensureContinuousStatusPolling() {
-  if (continuousStatusPollTimer) {
-    return;
-  }
-
-  continuousStatusPollTimer = globalThis.setInterval(() => {
-    refreshContinuousTranslationStatus().catch(() => {});
-  }, 3000);
-}
-
-async function onHideSubtitlesClick() {
-  hideSubtitlesButton.disabled = true;
-  setStatus("Hiding subtitles...");
-
-  try {
-    const response = await sendRuntimeMessage({ type: "CLEAR_SELECTED_VIDEO_SUBTITLES" });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Failed to hide subtitles.");
-    }
-
-    setStatus(`Subtitles hidden for video ${Number(response.data?.videoIndex) + 1}.`);
-  } catch (error) {
-    setStatus(`Error: ${error.message || String(error)}`);
+    popupState.error = error instanceof Error ? error.message : String(error);
+    popupState.status = "Error";
   } finally {
-    hideSubtitlesButton.disabled = false;
+    await loadState().catch(() => {
+      render();
+    });
   }
 }
 
-scanButton.addEventListener("click", onScanClick);
-translateButton.addEventListener("click", onTranslateClick);
-stopTranslateButton.addEventListener("click", onStopTranslateClick);
-hideSubtitlesButton.addEventListener("click", onHideSubtitlesClick);
-
-resultsEl.addEventListener("click", async (event) => {
-  const button = event.target.closest('button[data-action="select-video"]');
-  if (!button) {
-    return;
-  }
-
-  const videoIndex = Number(button.dataset.videoIndex);
-  if (!Number.isInteger(videoIndex)) {
-    return;
-  }
-
-  button.disabled = true;
-  try {
-    await onSelectVideo(videoIndex);
-  } catch (error) {
-    setStatus(`Error: ${error.message || String(error)}`);
-  } finally {
-    button.disabled = false;
-  }
+els.scanBtn.addEventListener("click", async () => {
+  await runAction(async () => {
+    const response = await sendMessage({ type: "SCAN_VIDEOS" });
+    popupState.videos = response.videos || [];
+    popupState.pageUrl = response.pageUrl || "";
+    popupState.status = popupState.videos.length ? "Idle" : "No videos found";
+  });
 });
 
-setContinuousControls({ running: false });
-ensureContinuousStatusPolling();
-refreshContinuousTranslationStatus().catch(() => {});
+els.refreshBtn.addEventListener("click", async () => {
+  await runAction(async () => {
+    await loadState();
+  });
+});
+
+els.startBtn.addEventListener("click", async () => {
+  await runAction(async () => {
+    popupState.status = "Extracting audio";
+    popupState.targetLanguage = (els.targetLanguage.value || "zh").trim() || "zh";
+    renderStatus();
+
+    const response = await sendMessage({
+      type: "START_TRANSLATION",
+      targetLanguage: popupState.targetLanguage
+    });
+
+    if (typeof response.cueCount === "number") {
+      popupState.status = `Idle (${response.cueCount} cues)`;
+    }
+  });
+});
+
+els.stopBtn.addEventListener("click", async () => {
+  await runAction(async () => {
+    await sendMessage({ type: "STOP_TRANSLATION" });
+    popupState.status = "Idle";
+    popupState.error = "";
+  });
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadState().catch((error) => {
+    popupState.status = "Error";
+    popupState.error = error instanceof Error ? error.message : String(error);
+    render();
+  });
+});
+

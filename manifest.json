@@ -1,15 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "Translate Video Subtitles",
+  "name": "Video Audio Translator",
   "version": "0.1.0",
-  "description": "Phase 1: Detect video elements on the active tab.",
-  "permissions": ["activeTab", "scripting", "storage", "tabs"],
-  "host_permissions": ["http://localhost:8787/*"],
+  "description": "Detect videos on the current page and prepare subtitle translation via a local backend.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost:8787/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Translate Video",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_title": "Video Audio Translator"
   }
 }
+

@@ -1,186 +1,50 @@
 from __future__ import annotations
 
-import io
-import json
 from typing import Any
 
-from openai import OpenAI
-
-from .config import config
-
-
-_client: OpenAI | None = None
+from .config import settings
+from .models import SubtitleCue
 
 
-def _get_client() -> OpenAI:
-  global _client
-
-  if not config.openai_api_key:
-    raise RuntimeError("OPENAI_API_KEY is not configured in server/.env")
-
-  if _client is None:
-    _client = OpenAI(api_key=config.openai_api_key)
-
-  return _client
-
-
-def _read_field(obj: Any, field: str, default: Any = None) -> Any:
-  if isinstance(obj, dict):
-    return obj.get(field, default)
-  return getattr(obj, field, default)
-
-
-def _normalize_segments(verbose_result: Any) -> list[dict[str, Any]]:
-  raw_segments = _read_field(verbose_result, "segments", []) or []
-
-  if raw_segments:
-    normalized: list[dict[str, Any]] = []
-    for index, segment in enumerate(raw_segments):
-      normalized.append(
-        {
-          "index": index,
-          "start": float(_read_field(segment, "start", 0) or 0),
-          "end": float(_read_field(segment, "end", 0) or 0),
-          "text": str(_read_field(segment, "text", "") or "").strip(),
-        }
-      )
-    return normalized
-
-  text = str(_read_field(verbose_result, "text", "") or "").strip()
-  if not text:
-    return []
-
-  return [{"index": 0, "start": 0, "end": 0, "text": text}]
-
-
-def _translate_segments_with_text_model(
-  segments: list[dict[str, Any]],
-  target_language: str,
-) -> dict[str, Any]:
-  if (
-    not config.enable_text_segment_translation
-    or not target_language
-    or len(segments) == 0
-  ):
-    return {
-      "enabled": False,
-      "reason": "Text segment translation disabled or no targetLanguage provided.",
-    }
-
-  client = _get_client()
-  input_segments = [segment["text"] for segment in segments]
-
-  prompt = " ".join(
-    [
-      "Translate each item in the JSON array into the requested target language.",
-      "Keep the same array length and order.",
-      'Return JSON only with shape: {"translations": ["..."]}.',
-      f"Target language: {target_language}",
+def _mock_chinese_cues(target_language: str) -> list[SubtitleCue]:
+    lang = (target_language or "zh").strip() or "zh"
+    text1 = "這是字幕原型。後端已收到影片請求，下一步會接上 yt-dlp 與 OpenAI。"
+    text2 = "目前是測試字幕，用來驗證 Chrome 擴充功能的掃描、選取與字幕顯示流程。"
+    if not lang.startswith("zh"):
+        text1 = f"[{lang}] Subtitle prototype: backend request received."
+        text2 = f"[{lang}] Mock subtitles are enabled for end-to-end UI testing."
+    return [
+        SubtitleCue(start=0.5, end=4.8, text=text1, lang=lang),
+        SubtitleCue(start=5.1, end=11.5, text=text2, lang=lang),
     ]
-  )
-
-  completion = client.chat.completions.create(
-    model=config.models.text_translate,
-    response_format={"type": "json_object"},
-    messages=[
-      {"role": "system", "content": "You are a precise subtitle translator."},
-      {"role": "user", "content": f"{prompt}\n\n{json.dumps(input_segments)}"},
-    ],
-  )
-
-  content = (
-    completion.choices[0].message.content
-    if completion.choices and completion.choices[0].message
-    else "{}"
-  ) or "{}"
-
-  try:
-    parsed = json.loads(content)
-  except json.JSONDecodeError as exc:
-    raise RuntimeError("Failed to parse segment translation JSON from OpenAI.") from exc
-
-  translations = parsed.get("translations", []) if isinstance(parsed, dict) else []
-  if not isinstance(translations, list):
-    raise RuntimeError("Segment translation payload is not a list.")
-
-  recovered_count_mismatch = len(translations) != len(segments)
-  if recovered_count_mismatch:
-    # Keep the chunk flowing even if the text model merges/splits items.
-    # We preserve array length by truncating extras and falling back to source text for missing entries.
-    normalized_translations: list[str] = []
-    for index, segment in enumerate(segments):
-      if index < len(translations):
-        normalized_translations.append(str(translations[index] or "").strip())
-      else:
-        normalized_translations.append(str(segment.get("text", "") or ""))
-    translations = normalized_translations
-
-  result = {
-    "enabled": True,
-    "model": config.models.text_translate,
-    "targetLanguage": target_language,
-    "segments": [
-      {
-        **segment,
-        "translatedText": str(translations[index] or ""),
-      }
-      for index, segment in enumerate(segments)
-    ],
-  }
-
-  if recovered_count_mismatch:
-    result["warning"] = "Segment translation count mismatch recovered by padding/truncating."
-
-  return result
 
 
-def create_timed_text_from_audio(
-  *,
-  buffer: bytes,
-  filename: str | None,
-  mime_type: str | None,
-  mode: str,
-  source_language: str,
-  target_language: str,
-) -> dict[str, Any]:
-  client = _get_client()
+def translate_audio_to_timed_text(
+    *,
+    target_language: str,
+    extracted_audio_path: str | None,
+    source_url: str,
+) -> tuple[list[SubtitleCue], list[str], dict[str, Any]]:
+    """
+    Scaffold for OpenAI timed-text generation.
 
-  file_obj = io.BytesIO(buffer)
-  file_obj.name = filename or "audio.webm"
-
-  if mode == "translate_to_english":
-    translation = client.audio.translations.create(
-      file=file_obj,
-      model=config.models.audio_translate,
-      response_format="vtt",
-    )
-
-    return {
-      "mode": mode,
-      "format": "vtt",
-      "timedText": translation if isinstance(translation, str) else str(translation or ""),
-      "note": "OpenAI audio translation endpoint returns English output.",
+    Current behavior:
+    - Returns mock subtitle cues by default (ENABLE_MOCK_SUBTITLES=true)
+    - Returns a helpful warning when real integration is not yet implemented
+    """
+    warnings: list[str] = []
+    debug: dict[str, Any] = {
+        "source_url": source_url,
+        "has_local_audio": bool(extracted_audio_path),
+        "mock_enabled": settings.enable_mock_subtitles,
+        "configured_model": settings.openai_model,
+        "has_openai_key": bool(settings.openai_api_key),
     }
 
-  transcription_kwargs: dict[str, Any] = {
-    "file": file_obj,
-    "model": config.models.audio_transcribe,
-    "response_format": "verbose_json",
-    "timestamp_granularities": ["segment"],
-  }
-  if source_language:
-    transcription_kwargs["language"] = source_language
+    if settings.enable_mock_subtitles:
+        warnings.append("Mock subtitles enabled; no real yt-dlp audio extraction or OpenAI call was made.")
+        return _mock_chinese_cues(target_language), warnings, debug
 
-  transcription = client.audio.transcriptions.create(**transcription_kwargs)
-  segments = _normalize_segments(transcription)
-  translation = _translate_segments_with_text_model(segments, target_language)
+    warnings.append("Real OpenAI timed-text integration is not implemented yet in this scaffold.")
+    return [], warnings, debug
 
-  return {
-    "mode": "transcribe",
-    "format": "segments",
-    "transcriptText": str(_read_field(transcription, "text", "") or ""),
-    "sourceLanguage": source_language or None,
-    "detectedLanguage": _read_field(transcription, "language", None),
-    "segments": segments,
-    "translation": translation,
-  }

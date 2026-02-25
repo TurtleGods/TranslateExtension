@@ -1,31 +1,54 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Translate Video</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Audio Translator</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <main class="popup">
-      <h1>Video Detector</h1>
-      <label class="field">
-        <span class="field-label">Result Language</span>
-        <select id="resultLanguageSelect">
-          <option value="zh-TW" selected>Chinese (Traditional)</option>
+    <main class="app">
+      <header class="header">
+        <h1>Video Audio Translator</h1>
+        <p class="subtitle">Chrome prototype (`yt-dlp` backend + OpenAI)</p>
+      </header>
+
+      <section class="panel">
+        <div class="row">
+          <button id="scanBtn" class="btn primary">Scan Videos</button>
+          <button id="refreshBtn" class="btn ghost" title="Refresh popup state">Refresh</button>
+        </div>
+        <p id="pageUrl" class="page-url"></p>
+      </section>
+
+      <section class="panel">
+        <label for="targetLanguage" class="label">Target language</label>
+        <select id="targetLanguage">
+          <option value="zh" selected>Chinese (中文)</option>
           <option value="en">English</option>
         </select>
-      </label>
-      <button id="scanButton" type="button">Scan Videos</button>
-      <button id="translateButton" type="button" class="secondary">Translate Continuously (60s chunks)</button>
-      <button id="stopTranslateButton" type="button" class="danger">Stop Translating</button>
-      <button id="hideSubtitlesButton" type="button" class="ghost">Hide Subtitles</button>
-      <p id="status" class="status" aria-live="polite">Ready.</p>
-      <section>
-        <h2>Detected Videos</h2>
-        <ul id="results" class="results"></ul>
+        <p class="hint">Default: Chinese (`zh`).</p>
+      </section>
+
+      <section class="panel">
+        <div class="row between">
+          <span class="label">Detected videos</span>
+          <span id="videoCount" class="badge">0</span>
+        </div>
+        <div id="videoList" class="video-list empty">No scan yet.</div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <button id="startBtn" class="btn success">Start Translation</button>
+          <button id="stopBtn" class="btn danger">Stop</button>
+        </div>
+        <p id="statusLine" class="status">Status: Idle</p>
+        <p id="errorLine" class="error" hidden></p>
+        <p id="backendLine" class="hint"></p>
       </section>
     </main>
+
     <script src="popup.js"></script>
   </body>
   </html>

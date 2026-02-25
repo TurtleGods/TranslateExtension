@@ -7,46 +7,28 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+BASE_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = BASE_DIR / ".env"
+load_dotenv(ENV_PATH)
 
 
-def _get_bool(value: str | None, fallback: bool = False) -> bool:
-  if value is None:
-    return fallback
-
-  normalized = value.strip().lower()
-  if normalized in {"1", "true", "yes", "on"}:
-    return True
-  if normalized in {"0", "false", "no", "off"}:
-    return False
-  return fallback
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
-class ModelConfig:
-  audio_transcribe: str
-  audio_translate: str
-  text_translate: str
+class Settings:
+    backend_host: str = os.getenv("BACKEND_HOST", "127.0.0.1")
+    backend_port: int = int(os.getenv("BACKEND_PORT", "8787"))
+    allow_origin: str = os.getenv("ALLOW_ORIGIN", "*")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini-transcribe")
+    enable_mock_subtitles: bool = _bool_env("ENABLE_MOCK_SUBTITLES", True)
+    temp_dir: str = os.getenv("TEMP_DIR", str(BASE_DIR / "tmp"))
 
 
-@dataclass(frozen=True)
-class AppConfig:
-  port: int
-  openai_api_key: str
-  models: ModelConfig
-  enable_text_segment_translation: bool
+settings = Settings()
 
-
-config = AppConfig(
-  port=int(os.getenv("PORT", "8787")),
-  openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-  models=ModelConfig(
-    audio_transcribe=os.getenv("OPENAI_AUDIO_TRANSCRIBE_MODEL", "whisper-1"),
-    audio_translate=os.getenv("OPENAI_AUDIO_TRANSLATE_MODEL", "whisper-1"),
-    text_translate=os.getenv("OPENAI_TEXT_TRANSLATE_MODEL", "gpt-4o-mini"),
-  ),
-  enable_text_segment_translation=_get_bool(
-    os.getenv("ENABLE_TEXT_SEGMENT_TRANSLATION"),
-    False,
-  ),
-)

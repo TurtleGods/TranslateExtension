@@ -1,1 +1,2 @@
-# Python backend package for the local OpenAI proxy.
+"""Local backend package for video audio translation."""
+
