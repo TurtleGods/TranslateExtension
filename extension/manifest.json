@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Translate Extension",
+  "version": "0.1.0",
+  "description": "Generate translated subtitles for the current page's video with a local OpenAI-powered backend.",
+  "permissions": [
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:8787/*"
+  ],
+  "action": {
+    "default_title": "Translate Subtitles",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

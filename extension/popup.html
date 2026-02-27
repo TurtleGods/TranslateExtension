@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Translate Subtitles</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <p class="eyebrow">Local backend</p>
+      <h1>Translate video subtitles</h1>
+      <p class="copy">Uses the current tab URL, your local FastAPI service, and OpenAI to generate translated WebVTT subtitles.</p>
+
+      <label class="field">
+        <span>Target language</span>
+        <select id="targetLanguage">
+          <option value="Traditional Chinese" selected>Traditional Chinese</option>
+          <option value="English">English</option>
+        </select>
+      </label>
+
+      <button id="generateButton" type="button">Generate for current tab</button>
+      <p id="status" class="status" aria-live="polite"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
